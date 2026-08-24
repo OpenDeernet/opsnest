@@ -598,6 +598,7 @@ pub fn run() {
             file_manager::delete_remote_file,
             file_manager::download_remote_file,
             file_manager::upload_remote_file,
+            file_manager::upload_workspace_file_to_server,
             file_manager::read_local_file_base64,
             file_manager::write_local_file_base64,
             workspace::ensure_workspace,

@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   font-family: "Noto Sans SC Variable", "Noto Sans SC", "Segoe UI Variable", system-ui, sans-serif;
   font-weight: 450;
   color: #eeeef0;
@@ -31,6 +32,7 @@
 }
 
 :root[data-theme="light"] {
+  color-scheme: light;
   color: #1a1a1f;
   background: #f5f5f6;
   --line: #d7d7dc;
@@ -818,6 +820,11 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .history-page-header .feature-intro { margin-bottom: 20px; }
 .history-actions { display: flex; gap: 8px; padding-top: 4px; }
 .history-actions button { white-space: nowrap; }
+.history-filter-row { display: flex; align-items: center; gap: 10px; max-width: 900px; margin: -4px 0 18px; color: var(--muted); font-size: 12px; }
+.history-filter-row label { flex: 0 0 auto; }
+.history-filter-row select { min-width: 190px; padding: 8px 30px 8px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; }
+.history-filter-row select option { background: #292629; color: #eeeef0; }
+:root[data-theme="light"] .history-filter-row select option { background: #fff; color: #1a1a1f; }
 .history-list { display: grid; gap: 10px; max-width: 900px; }
 .history-entry { padding: 14px 16px; border: 1px solid var(--line-soft); border-left: 3px solid var(--accent); border-radius: 10px; background: var(--card); }
 .history-entry-task { border-left-color: #5b9cf6; }
@@ -827,7 +834,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .history-entry time { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .history-entry p { margin: 8px 0 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; font-size: 13px; }
 .history-entry-runtime p { margin: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--text); }
-@media (max-width: 720px) { .history-page-header { flex-direction: column; } .history-actions { padding-top: 0; } .history-entry-heading { align-items: flex-start; flex-direction: column; gap: 4px; } }
+@media (max-width: 720px) { .history-page-header { flex-direction: column; } .history-actions { padding-top: 0; } .history-filter-row { align-items: flex-start; flex-direction: column; } .history-filter-row select { width: 100%; } .history-entry-heading { align-items: flex-start; flex-direction: column; gap: 4px; } }
 .server-chat-section { display: none; }
 .server-chat-messages { min-height: 72px; max-height: 300px; overflow: auto; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 12px 12px 0 0; background: var(--card); color: var(--muted); }
 .server-chat-message { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; margin: 0 0 12px; color: var(--text); white-space: pre-wrap; line-height: 1.55; font-size: 13px; }

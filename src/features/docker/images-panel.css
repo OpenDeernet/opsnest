@@ -21,6 +21,8 @@
 .docker-image-progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
 .docker-image-progress-heading strong { color: var(--text-strong); font-size: 12px; }
 .docker-image-progress-heading span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.docker-image-progress-heading button { flex: 0 0 auto; border: 1px solid color-mix(in srgb, var(--danger) 52%, var(--line-soft)); border-radius: 6px; padding: 3px 7px; color: var(--danger); background: transparent; font-size: 10px; cursor: pointer; }
+.docker-image-progress-heading button:disabled { opacity: .55; cursor: wait; }
 .docker-image-progress-layers { display: grid; gap: 7px; max-height: 220px; overflow: auto; }
 .docker-image-progress-layer { display: grid; gap: 4px; min-width: 0; }
 .docker-image-progress-layer > div:first-child { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }

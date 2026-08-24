@@ -160,6 +160,9 @@ function shellQuote(value: string) {
 }
 
 const dockerActionQueues = new Map<string, Promise<void>>();
+// Keep the short-lived SSH channel for the currently running Docker action so
+// a panel that was closed/reopened can still interrupt a stuck image pull.
+const activeDockerActionSessions = new Map<string, { sessionId: string; action: DockerPanelAction }>();
 async function withDockerActionLock<T>(serverId: string, task: () => Promise<T>): Promise<T> {
   const previous = dockerActionQueues.get(serverId) || Promise.resolve();
   let release!: () => void;
@@ -172,6 +175,72 @@ async function withDockerActionLock<T>(serverId: string, task: () => Promise<T>)
   } finally {
     release();
     if (dockerActionQueues.get(serverId) === queued) dockerActionQueues.delete(serverId);
+  }
+}
+
+async function cancelDockerImageUpgrade(
+  server: ServerSummary,
+  reference: string,
+): Promise<DockerPanelActionResult> {
+  const at = server.host.indexOf("@");
+  const username = at > 0 ? server.host.slice(0, at) : "root";
+  const host = at > 0 ? server.host.slice(at + 1) : server.host;
+  const password =
+    server.password ??
+    (await invoke<string | null>("load_server_credential", { serverId: server.id }).catch(() => null));
+  const sudoPassword = await invoke<string | null>(
+    "load_server_sudo_credential",
+    { serverId: server.id },
+  ).catch(() => null);
+  const opened = await invoke<{ sessionId: string }>("open_ssh_session", {
+    request: {
+      host,
+      port: server.port,
+      username,
+      authMethod: server.authMethod ?? "password",
+      password,
+      privateKeyPath: server.privateKeyPath ?? null,
+      passphrase: null,
+    },
+  });
+  try {
+    const script = [
+      "target=" + shellQuote(reference),
+      // Match the actual docker/podman child process, not this diagnostic
+      // shell's own ps/awk command. The exact reference prevents cancelling a
+      // different image pull on the same server.
+      "pids=$(ps -eo pid=,args= 2>/dev/null | awk -v ref=\"$target\" '$0 ~ /[d]ocker[[:space:]-]+pull|[p]odman[[:space:]-]+pull/ && index($0, ref) {print $1}')",
+      "if [ -n \"$pids\" ]; then kill -TERM $pids 2>/dev/null || true; fi",
+      "printf '__OPSNEST_DOCKER_CANCELLED__\\t%s\\t%s\\n' \"$target\" \"$pids\"",
+    ].join("; ");
+    const identity = await invoke<string>("execute_ssh_command", {
+      sessionId: opened.sessionId,
+      command: "id -u",
+      approved: true,
+      sudoPassword: null,
+    });
+    const command = identity.trim() === "0" || !sudoPassword
+      ? script
+      : "sudo sh -c " + shellQuote(script);
+    const output = await invoke<string>("execute_ssh_command", {
+      sessionId: opened.sessionId,
+      command,
+      approved: true,
+      sudoPassword,
+    });
+    return {
+      message: output.includes("__OPSNEST_DOCKER_CANCELLED__")
+        ? `已请求停止镜像升级：${reference}`
+        : `已发送停止请求：${reference}`,
+    };
+  } finally {
+    await invoke("close_ssh_session", { sessionId: opened.sessionId }).catch(() => undefined);
+    const active = activeDockerActionSessions.get(server.id);
+    if (active?.action.kind === "image" && active.action.operation === "upgrade") {
+      // Closing the original command channel is the fallback that releases
+      // the per-server queue if the remote pull ignores SIGTERM.
+      await invoke("close_ssh_session", { sessionId: active.sessionId }).catch(() => undefined);
+    }
   }
 }
 
@@ -302,8 +371,71 @@ function dockerActionCommand(action: DockerPanelAction) {
           : "image rm " + shellQuote(reference);
     return wrap("docker_cmd " + args);
   }
-  if (action.kind === "registry")
-    return wrap("docker_cmd info --format '{{json .RegistryConfig}}'");
+  if (action.kind === "registry") {
+    if (action.operation === "list")
+      return wrap("docker_cmd info --format '{{json .RegistryConfig}}'; printf '\\n__OPSNEST_REGISTRY_DAEMON_CONFIG__\\n'; if [ -r /etc/docker/daemon.json ]; then cat /etc/docker/daemon.json; fi");
+    const mirror = action.mirror?.trim() || "";
+    if (!mirror)
+      throw new Error("请填写镜像仓库地址");
+    if (action.operation === "test") {
+      const endpoint = shellQuote(mirror);
+      return wrap([
+        "endpoint=" + endpoint,
+        "case \"$endpoint\" in http://*|https://*) ;; *) printf '__OPSNEST_REGISTRY_TEST__\\tinvalid\\n'; exit 0;; esac",
+        "case \"$endpoint\" in */) probe=\"${endpoint}v2/\";; *) probe=\"${endpoint}/v2/\";; esac",
+        "code=000",
+        "if command -v curl >/dev/null 2>&1; then code=$(curl -k -sS --max-time 8 -o /dev/null -w '%{http_code}' \"$probe\" 2>/dev/null || printf '000'); elif command -v wget >/dev/null 2>&1; then if wget --no-check-certificate -q --timeout=8 --spider \"$probe\"; then code=200; else code=000; fi; else code=unavailable; fi",
+        "printf '__OPSNEST_REGISTRY_TEST__\\t%s\\n' \"$code\"",
+      ].join("; "));
+    }
+    const operation = action.operation === "update"
+      ? "update"
+      : action.operation === "remove"
+        ? "remove"
+        : action.operation === "setDefault"
+          ? "setDefault"
+          : "add";
+    const previousMirror = action.previousMirror?.trim() || "";
+    const script = [
+      "set -eu",
+      "config=/etc/docker/daemon.json",
+      "backup=\"$config.opsnest.bak\"",
+      "[ -f \"$config\" ] && cp -p \"$config\" \"$backup\" || true",
+      "mkdir -p \"$(dirname \"$config\")\"",
+      "python3 - \"$config\" " + shellQuote(operation) + " " + shellQuote(mirror) + " " + shellQuote(previousMirror) + " <<'PY'",
+      "import json, os, sys, tempfile",
+      "config, operation, mirror, previous = sys.argv[1:]",
+      "data = {}",
+      "if os.path.exists(config) and os.path.getsize(config):",
+      "    with open(config, encoding='utf-8') as handle:",
+      "        data = json.load(handle)",
+      "mirrors = [str(item).strip().rstrip('/') for item in data.get('registry-mirrors', []) if str(item).strip()]",
+      "if operation == 'update':",
+      "    if previous not in mirrors: raise SystemExit('未找到要编辑的镜像仓库')",
+      "    if mirror in mirrors and mirror != previous: raise SystemExit('镜像仓库地址已存在')",
+      "    mirrors[mirrors.index(previous)] = mirror",
+      "elif operation == 'remove':",
+      "    if mirror not in mirrors: raise SystemExit('未找到要删除的镜像仓库')",
+      "    mirrors.remove(mirror)",
+      "elif operation == 'setDefault':",
+      "    if mirror not in mirrors: raise SystemExit('未找到要设为首选的镜像仓库')",
+      "    mirrors = [mirror] + [item for item in mirrors if item != mirror]",
+      "else:",
+      "    if mirror in mirrors: raise SystemExit('镜像仓库地址已存在')",
+      "    mirrors.append(mirror)",
+      "data['registry-mirrors'] = mirrors",
+      "directory = os.path.dirname(config) or '.'",
+      "fd, temporary = tempfile.mkstemp(prefix='.daemon.', dir=directory)",
+      "with os.fdopen(fd, 'w', encoding='utf-8') as handle:",
+      "    json.dump(data, handle, indent=2, ensure_ascii=False)",
+      "    handle.write('\\n')",
+      "os.chmod(temporary, 0o644)",
+      "os.replace(temporary, config)",
+      "PY",
+      "printf '镜像仓库配置已写入：%s；重启 Docker 后生效\\n' \"$config\"",
+    ].join("\n");
+    return wrap("run_privileged_cmd sh -c " + shellQuote(script));
+  }
   if (action.kind === "network") {
     const name = action.name?.trim() || "";
     if (action.operation === "inspect" && !name)
@@ -699,6 +831,8 @@ type ActivityRecord = {
   title: string;
   detail: string;
   timestamp: string;
+  /** Optional explicit association for newer records; older records encode it in the title. */
+  serverName?: string;
 };
 type ManagerChatMessage = { role: "user" | "assistant"; text: string };
 const AI_SSH_MEMORY_FILE = "ai-ssh-memory.json";
@@ -2896,7 +3030,7 @@ function ServerManagerPage({
         : "当前还没有保存的服务器。请主动收集新增服务器的名称、地址、端口、用户名和认证方式。",
       serverAdditionGuidance,
       "总管不硬编码 frp、Tailscale、autossh 等穿透方案。用户明确要求内网穿透时，由你根据服务器环境询问、检查并指导用户完成方案；远程检查和执行使用 request_server_command，并等待用户确认。确认最终的 host、port、username 和认证方式可以通过 SSH 连接后，调用 create_server_connection 创建连接卡片。该工具只负责测试并保存连接信息，不负责选择或安装穿透软件。",
-      "当前总管会话也绑定了一个 OpsNest 本地 workspace。用户要求保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file 或 workspace_delete_file；这里的 workspace 是本机工作区，不是远程服务器目录。",
+      "当前总管会话也绑定了一个 OpsNest 本地 workspace。用户要求保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file 或 workspace_delete_file；这里的 workspace 是本机工作区，不是远程服务器目录。需要把生成的脚本交给远程服务器时，先调用 upload_workspace_file，再用 request_server_command 请求用户确认执行远程路径。",
       "密码和私钥口令永远由前端安全输入，不要索取、复述或写入聊天、日志、模型上下文或 JSON。若用户在对话中直接写出疑似明文密码，必须提醒：下次您不需要在对话中直接写上密码，OpsNest 会提供专用的密码输入界面；明文密码泄露给模型，特别是第三方中转类模型接口，会有严重安全风险。同时继续使用脱敏后的内容，不要引用或重复密码。",
       "只有连接测试成功且用户确认后，才能说服务器已添加。普通聊天、感谢和确认直接自然回答，不要用固定关键词分类。",
       `服务器列表：${servers.map((item) => `${item.id}=${item.name} (${item.host}:${item.port})`).join("；") || "（暂无）"}`,
@@ -3075,6 +3209,25 @@ function ServerManagerPage({
             type: "object",
             properties: { path: { type: "string" } },
             required: ["path"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "upload_workspace_file",
+          description:
+            "将当前总管会话本地 workspace 中的一个文件上传到指定服务器的绝对路径。上传前需要用户确认；不会自动执行文件，也不会覆盖远程已有文件，除非用户明确确认 overwrite。",
+          parameters: {
+            type: "object",
+            properties: {
+              server_id: { type: "string", enum: servers.map((item) => item.id) },
+              path: { type: "string", description: "workspace 相对源文件路径。" },
+              remote_path: { type: "string", description: "远程服务器绝对目标路径。" },
+              overwrite: { type: "boolean", description: "仅用户明确确认覆盖时传 true。" },
+            },
+            required: ["server_id", "path", "remote_path"],
             additionalProperties: false,
           },
         },
@@ -3508,6 +3661,69 @@ function ServerManagerPage({
               tool_call_id: call.id || "opsnest-tool",
               content: `已删除本地 workspace 文件：${path}。`,
             });
+            continue;
+          }
+          if (name === "upload_workspace_file") {
+            const target = servers.find((item) => item.id === String(args.server_id || ""));
+            const path = String(args.path || "").trim();
+            const remotePath = String(args.remote_path || "").trim();
+            const overwrite = args.overwrite === true;
+            if (!target || !path || !remotePath.startsWith("/")) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "上传需要有效的服务器、workspace 相对路径和远程绝对路径。",
+              });
+              continue;
+            }
+            const approved = await requestApproval({
+              kind: "command",
+              title: "AI 请求上传 workspace 文件",
+              detail: `服务器：${target.name}\n本地 workspace：${path}\n远程目标：${remotePath}${overwrite ? "\n将覆盖已有文件" : ""}`,
+            });
+            if (!approved) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "用户拒绝上传 workspace 文件。",
+              });
+              continue;
+            }
+            const at = target.host.indexOf("@");
+            const username = at > 0 ? target.host.slice(0, at) : "root";
+            const host = at > 0 ? target.host.slice(at + 1) : target.host;
+            const password =
+              target.password ??
+              (await invoke<string | null>("load_server_credential", { serverId: target.id }).catch(() => null));
+            const request = {
+              host,
+              port: target.port,
+              username,
+              authMethod: target.authMethod ?? "password",
+              password,
+              privateKeyPath: target.privateKeyPath ?? null,
+              passphrase: null,
+            };
+            try {
+              const bytes = await invoke<number>("upload_workspace_file_to_server", {
+                request,
+                workspaceId: managerWorkspaceId,
+                path,
+                remotePath,
+                overwrite,
+              });
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `已将 workspace 文件上传到 ${target.name}:${remotePath}（${bytes} 字节）。文件尚未执行；如需执行，请再调用 request_server_command 并等待确认。`,
+              });
+            } catch (error) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `workspace 文件上传失败：${String(error)}`,
+              });
+            }
             continue;
           }
           if (name === "opsnest_open_file_manager") {
@@ -3985,8 +4201,8 @@ function FeaturePage({
   );
 }
 
-function TaskHistoryPage() {
-  return <TaskHistoryView />;
+function TaskHistoryPage({ servers }: { servers: ServerSummary[] }) {
+  return <TaskHistoryView servers={servers} />;
   return (
     <div className="feature-page">
       <div className="settings-eyebrow">OpsNest</div>
@@ -4013,10 +4229,17 @@ function TaskHistoryPage() {
   );
 }
 
-function TaskHistoryView() {
+function activityRecordServerName(record: ActivityRecord) {
+  if (record.serverName?.trim()) return record.serverName.trim();
+  const separator = record.title.lastIndexOf(" · ");
+  return separator >= 0 ? record.title.slice(separator + 3).trim() : "";
+}
+
+function TaskHistoryView({ servers }: { servers: ServerSummary[] }) {
   const [records, setRecords] = React.useState<ActivityRecord[]>([]);
   const [debugLog, setDebugLog] = React.useState("");
   const [tab, setTab] = React.useState<"task" | "runtime" | "ai">("task");
+  const [taskServerFilter, setTaskServerFilter] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -4035,6 +4258,18 @@ function TaskHistoryView() {
   const tasks = records.filter((record) => record.category === "task");
   const conversations = records.filter((record) => record.category === "ai");
   const runtimeLines = debugLog.split(/\r?\n/).filter((line) => line.trim());
+  const serverScopedRecords = [...tasks, ...conversations];
+  const serverNames = Array.from(
+    new Set(
+      [
+        ...servers.map((server) => server.name.trim()),
+        ...serverScopedRecords.map(activityRecordServerName),
+      ].filter(Boolean),
+    ),
+  );
+  const hasUnassignedRecords = serverScopedRecords.some(
+    (record) => !activityRecordServerName(record),
+  );
   const clearCurrent = async () => {
     if (
       !(await appConfirm(
@@ -4054,7 +4289,17 @@ function TaskHistoryView() {
       );
     await load();
   };
-  const currentRecords = tab === "task" ? tasks : conversations;
+  const matchesServerFilter = (record: ActivityRecord) => {
+    if (!taskServerFilter) return true;
+    const serverName = activityRecordServerName(record);
+    return taskServerFilter === "__unassigned"
+      ? !serverName
+      : serverName === taskServerFilter;
+  };
+  const filteredTasks = tasks.filter(matchesServerFilter);
+  const filteredConversations = conversations.filter(matchesServerFilter);
+  const currentRecords =
+    tab === "task" ? filteredTasks : filteredConversations;
   return (
     <div className="feature-page history-page">
       <div className="history-page-header">
@@ -4089,23 +4334,43 @@ function TaskHistoryView() {
           type="button"
           onClick={() => setTab("task")}
         >
-          任务记录 <span>{tasks.length}</span>
-        </button>
-        <button
-          className={tab === "runtime" ? "is-active" : ""}
-          type="button"
-          onClick={() => setTab("runtime")}
-        >
-          软件运行日志 <span>{runtimeLines.length}</span>
+          任务记录 <span>{filteredTasks.length}</span>
         </button>
         <button
           className={tab === "ai" ? "is-active" : ""}
           type="button"
           onClick={() => setTab("ai")}
-        >
-          AI 对话日志 <span>{conversations.length}</span>
+          >
+          AI 对话日志 <span>{filteredConversations.length}</span>
+        </button>
+        <button
+          className={tab === "runtime" ? "is-active" : ""}
+          type="button"
+          onClick={() => setTab("runtime")}
+          >
+          软件运行日志 <span>{runtimeLines.length}</span>
         </button>
       </div>
+      {(tab === "task" || tab === "ai") && (
+        <div className="history-filter-row">
+          <label htmlFor="task-server-filter">服务器</label>
+          <select
+            id="task-server-filter"
+            value={taskServerFilter}
+            onChange={(event) => setTaskServerFilter(event.target.value)}
+          >
+            <option value="">全部服务器</option>
+            {serverNames.map((serverName) => (
+              <option key={serverName} value={serverName}>
+                {serverName}
+              </option>
+            ))}
+            {hasUnassignedRecords && (
+              <option value="__unassigned">未关联服务器</option>
+            )}
+          </select>
+        </div>
+      )}
       {tab === "runtime" ? (
         runtimeLines.length ? (
           <div className="history-list">
@@ -9532,7 +9797,13 @@ function App() {
     async (
       server: ServerSummary,
       action: DockerPanelAction,
-    ): Promise<DockerPanelActionResult> => withDockerActionLock(server.id, async () => {
+    ): Promise<DockerPanelActionResult> => {
+      // Cancellation must bypass the normal per-server queue: the queue may
+      // be occupied by the pull that we are trying to stop.
+      if (action.kind === "image" && action.operation === "cancelUpgrade") {
+        return cancelDockerImageUpgrade(server, action.reference?.trim() || "");
+      }
+      return withDockerActionLock(server.id, async () => {
       const at = server.host.indexOf("@");
       const username = at > 0 ? server.host.slice(0, at) : "root";
       const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -9556,6 +9827,7 @@ function App() {
           passphrase: null,
         },
       });
+      activeDockerActionSessions.set(server.id, { sessionId: opened.sessionId, action });
       setServers((current) =>
         current.map((item) =>
           item.id === server.id
@@ -9745,7 +10017,27 @@ function App() {
           return { message };
         }
         if (action.kind === "registry") {
-          const config = JSON.parse(message || "{}") as Record<string, unknown>;
+          if (action.operation === "test") {
+            const code = cleanOutput
+              .split(/\r?\n/)
+              .find((line) => line.startsWith("__OPSNEST_REGISTRY_TEST__\t"))
+              ?.split("\t")[1]
+              ?.trim() || "000";
+            const reachable = ["200", "401", "403"].includes(code);
+            return {
+              message: reachable
+                ? `连接成功（HTTP ${code}）`
+                : code === "invalid"
+                  ? "地址必须以 http:// 或 https:// 开头"
+                  : code === "unavailable"
+                    ? "服务器上未找到 curl 或 wget"
+                    : `连接失败（HTTP ${code}）`,
+            };
+          }
+          if (action.operation !== "list")
+            return { message: message || "镜像仓库配置已更新；重启 Docker 后生效" };
+          const [activePayload, daemonPayload = ""] = message.split("__OPSNEST_REGISTRY_DAEMON_CONFIG__");
+          const config = JSON.parse(activePayload.trim() || "{}") as Record<string, unknown>;
           const indexConfigs = (config.IndexConfigs ?? config.indexConfigs ?? {}) as Record<string, Record<string, unknown>>;
           const globalMirrors = Array.isArray(config.Mirrors) ? config.Mirrors.map(String) : [];
           const registries = Object.entries(indexConfigs).map(([key, value]) => {
@@ -9755,6 +10047,23 @@ function App() {
           });
           if (!registries.length && globalMirrors.length)
             registries.push({ name: "docker.io", secure: true, mirrors: globalMirrors });
+          try {
+            const daemonConfig = JSON.parse(daemonPayload.trim() || "{}") as Record<string, unknown>;
+            const configuredMirrors = Array.isArray(daemonConfig["registry-mirrors"])
+              ? daemonConfig["registry-mirrors"].map(String).map((item) => item.trim()).filter(Boolean)
+              : [];
+            if (configuredMirrors.length) {
+              const dockerRegistry = registries.find((registry) => registry.name === "docker.io");
+              if (dockerRegistry) {
+                dockerRegistry.mirrors = Array.from(new Set([...dockerRegistry.mirrors, ...configuredMirrors]));
+              } else {
+                registries.push({ name: "docker.io", secure: true, mirrors: configuredMirrors });
+              }
+            }
+          } catch {
+            // Docker may be running without a readable daemon.json. The active
+            // RegistryConfig above is still useful in that case.
+          }
           return { registries, message: "" };
         }
         if (action.kind === "network") {
@@ -9904,11 +10213,14 @@ function App() {
           throw new Error("不支持的 Docker 操作");
         return { dockerRootDir: action.value.trim(), message: message || "Docker 配置已更新" };
       } finally {
+        const active = activeDockerActionSessions.get(server.id);
+        if (active?.sessionId === opened.sessionId) activeDockerActionSessions.delete(server.id);
         await invoke("close_ssh_session", {
           sessionId: opened.sessionId,
         }).catch(() => undefined);
       }
-    }),
+      });
+    },
     [],
   );
   const moveDockerPanel = React.useCallback((placement: DockerPanelPlacement) => {
@@ -10291,7 +10603,7 @@ function App() {
               debugLogging={appearance.debugLogging}
             />
           ) : selectedMenu === "tasks" ? (
-            <TaskHistoryPage />
+            <TaskHistoryPage servers={servers} />
           ) : selectedMenu === "cron" ? (
             <FeaturePage
               title={isEnglish ? "Scheduled tasks" : "定时任务"}

@@ -73,8 +73,8 @@ export type DockerPanelAction =
   | { kind: "autostart"; enabled: boolean }
   | { kind: "root"; value: string }
   | { kind: "container"; name: string; operation: "start" | "stop" | "restart" | "details" | "logs" }
-  | { kind: "image"; operation: "list" | "inspect" | "pull" | "remove" | "check" | "checkOne" | "upgrade"; reference?: string; usedBy?: string[]; composeTargets?: Array<{ path: string; service: string }> }
-  | { kind: "registry"; operation: "list" }
+  | { kind: "image"; operation: "list" | "inspect" | "pull" | "remove" | "check" | "checkOne" | "upgrade" | "cancelUpgrade"; reference?: string; usedBy?: string[]; composeTargets?: Array<{ path: string; service: string }> }
+  | { kind: "registry"; operation: "list" | "test" | "add" | "update" | "remove" | "setDefault"; mirror?: string; previousMirror?: string }
   | { kind: "network"; operation: "list" | "inspect"; name?: string }
   | { kind: "compose"; operation: "list" | "browse" | "mkdir" | "inspect" | "read" | "config" | "logs" | "build" | "up" | "down" | "restart" | "remove" | "create"; path?: string; name?: string; content?: string; startAfterCreate?: boolean; overwriteExisting?: boolean };
 export type DockerPanelActionResult = {

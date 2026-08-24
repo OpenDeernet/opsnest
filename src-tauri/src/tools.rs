@@ -20,6 +20,7 @@ pub enum ToolKind {
     WorkspaceWriteFile,
     WorkspaceDeleteFile,
     DownloadToWorkspace,
+    UploadWorkspaceFile,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +244,21 @@ pub fn default_registry() -> ToolRegistry {
             "additionalProperties": false
         }),
     });
+    registry.register(ToolSpec {
+        kind: ToolKind::UploadWorkspaceFile,
+        name: "upload_workspace_file",
+        description: "Upload one file from the current local OpsNest workspace to an absolute path on the connected remote server through SFTP. Use only when the user asks to send a workspace file to the server or when a generated script must be executed remotely; do not overwrite an existing remote file unless the user explicitly confirmed it.",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Workspace-relative source file path." },
+                "remote_path": { "type": "string", "description": "Absolute destination path on the remote server." },
+                "overwrite": { "type": "boolean", "description": "Set true only after the user explicitly confirms replacing an existing remote file." }
+            },
+            "required": ["path", "remote_path"],
+            "additionalProperties": false
+        }),
+    });
     registry
 }
 
@@ -305,7 +321,7 @@ mod tests {
                 .map(|tool| tool.kind),
             Some(ToolKind::OpenFileEditor)
         );
-        assert_eq!(registry.schemas().as_array().map(Vec::len), Some(11));
+        assert_eq!(registry.schemas().as_array().map(Vec::len), Some(12));
         assert_eq!(
             registry.get("workspace_write_file").map(|tool| tool.kind),
             Some(ToolKind::WorkspaceWriteFile)
@@ -313,6 +329,10 @@ mod tests {
         assert_eq!(
             registry.get("download_to_workspace").map(|tool| tool.kind),
             Some(ToolKind::DownloadToWorkspace)
+        );
+        assert_eq!(
+            registry.get("upload_workspace_file").map(|tool| tool.kind),
+            Some(ToolKind::UploadWorkspaceFile)
         );
     }
 }

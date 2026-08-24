@@ -212,6 +212,7 @@ const DEFAULT_READ_BYTES: usize = 32 * 1024;
 const MAX_READ_BYTES: usize = 64 * 1024;
 const DEFAULT_WORKSPACE_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 /// Execute a read-only model tool without touching the interactive PTY. The
 /// existing terminal session supplies the credentials locally; only the
@@ -442,6 +443,44 @@ async fn execute_read_only_tool(
                 output,
             ))
         }
+        ToolKind::UploadWorkspaceFile => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "upload_workspace_file path is required".to_string())?
+                .trim();
+            let remote_path = arguments
+                .get("remote_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "upload_workspace_file remote_path is required".to_string())?
+                .trim();
+            if path.is_empty() || remote_path.is_empty() {
+                return Err("upload_workspace_file paths must not be empty".to_string());
+            }
+            if !remote_path.starts_with('/') {
+                return Err("upload_workspace_file remote_path must be an absolute path".to_string());
+            }
+            let overwrite = arguments
+                .get("overwrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let data = crate::workspace::read_workspace_bytes(
+                session_id,
+                path,
+                MAX_WORKSPACE_UPLOAD_BYTES,
+            )?;
+            let bytes = file_manager::upload_remote_bytes(&request, remote_path, &data, overwrite).await?;
+            let output = serde_json::to_string(&serde_json::json!({
+                "uploaded": true,
+                "path": path,
+                "remotePath": remote_path,
+                "bytes": bytes,
+                "overwrote": overwrite,
+                "location": "remote_server"
+            }))
+            .map_err(|error| format!("failed to encode upload_workspace_file result: {error}"))?;
+            Ok((format!("upload_workspace_file {path} -> {remote_path}"), output))
+        }
         ToolKind::RunCommand => Err("run_command is not a read-only tool".to_string()),
         ToolKind::OpenFileManager | ToolKind::OpenFileEditor => {
             Err("OpsNest UI tools use the UI action executor".to_string())
@@ -608,7 +647,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
     let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n当前会话同时绑定了一个 OpsNest 本地 workspace（工作区）。它位于用户电脑上，与远程服务器文件系统分离；需要保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file、workspace_delete_file 或 download_to_workspace。用户说“保存到 workspace/工作区/本地”时，必须使用这些本地工具，不要通过 run_command 在远程创建同名工作目录；但用户明确指定远程路径，或任务确实需要在远程服务器准备工作目录时，仍可使用远程工具。\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。用户明确要求打开 OpsNest 文件管理器或查看刚才修改的远程文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor；这些工具只改变 OpsNest 界面，不读取或修改远程文件。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。回答长度规则：默认先给结论，控制在 3-6 行或不超过 5 个要点；成功执行后只报告结果、异常和必要的下一步，不复述原始终端输出，不写背景教程、长篇风险清单或多个备选方案。只有用户明确要求详细解释、教程或完整排障步骤时才展开。");
-    let system = format!("{system}\n若工具返回超时，不要原样重复同一条命令；应缩小扫描范围、使用 -l/--include 或 Docker CLI 查询，避免递归读取大型日志目录。\n共享终端黑板（最近事件）：\n{board_context}\n");
+    let system = format!("{system}\n需要把本地 workspace 中生成的脚本交给远程服务器执行时，先使用 upload_workspace_file 上传，再使用 run_command 调用远程路径；workspace_write_file 只写本机，不会自动出现在服务器上。不要在没有对应工具结果时声称上传或执行成功。若工具返回超时，不要原样重复同一条命令；应缩小扫描范围、使用 -l/--include 或 Docker CLI 查询，避免递归读取大型日志目录。\n共享终端黑板（最近事件）：\n{board_context}\n");
     // The PTY output is already visible in the xterm surface. Keep replies
     // focused on interpretation and next steps instead of copying a full
     // directory listing or command transcript into the green AI channel.
@@ -841,6 +880,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                             ToolKind::WorkspaceWriteFile => "workspace_write_file".to_string(),
                             ToolKind::WorkspaceDeleteFile => "workspace_delete_file".to_string(),
                             ToolKind::DownloadToWorkspace => "download_to_workspace".to_string(),
+                            ToolKind::UploadWorkspaceFile => "upload_workspace_file".to_string(),
                             ToolKind::RunCommand => "run_command".to_string(),
                         };
                         (display, format!("__OPSNEST_READONLY_ERROR__{error}"))
@@ -1058,6 +1098,17 @@ fn is_interactive_agent_command(command: &str) -> bool {
     let Some(first) = words.first().map(String::as_str) else {
         return false;
     };
+    let first_base = first.rsplit('/').next().unwrap_or(first);
+    // 1Panel's CLI owns a confirmation prompt for destructive operations. Do
+    // not run it through the model tool channel, which has no safe way to
+    // relay a later y/n byte; ask the user to run it directly in the PTY.
+    if first_base == "1pctl"
+        && words.iter().any(|word| {
+            matches!(word.as_str(), "uninstall" | "remove" | "delete" | "purge" | "install" | "upgrade")
+        })
+    {
+        return true;
+    }
     let interactive_programs = [
         "bash", "sh", "zsh", "fish", "vim", "nvim", "nano", "top", "htop", "tmux",
         "screen", "mysql", "psql", "sftp", "ftp",
@@ -1281,7 +1332,7 @@ fn execute_opsnest_ui_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::{cached_service_discovery, remember_service_discovery};
+    use super::{cached_service_discovery, is_interactive_agent_command, remember_service_discovery};
 
     #[test]
     fn service_discovery_cache_marks_recent_result() {
@@ -1301,5 +1352,12 @@ mod tests {
             serde_json::from_str(&cached).expect("cached result should remain JSON");
         assert_eq!(payload["cached"], serde_json::Value::Bool(true));
         assert!(payload["cacheAgeMs"].is_number());
+    }
+
+    #[test]
+    fn one_panel_uninstall_stays_on_native_terminal_path() {
+        assert!(is_interactive_agent_command("1pctl uninstall"));
+        assert!(is_interactive_agent_command("/usr/local/bin/1pctl remove"));
+        assert!(!is_interactive_agent_command("1pctl status"));
     }
 }

@@ -1,5 +1,5 @@
 const shellCommandNames = new Set([
-  "alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami",
+  "1pctl", "alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami",
 ]);
 
 export function isLikelyShellCommand(input: string) {
@@ -19,6 +19,12 @@ export function isLikelyShellCommand(input: string) {
 export function isInteractiveShellCommand(input: string) {
   const normalized = input.trim().toLowerCase();
   if (!normalized) return false;
+  const firstToken = normalized.split(/\s+/, 1)[0] ?? "";
+  const firstBase = firstToken.split("/").at(-1) ?? firstToken;
+  // 1Panel's management CLI asks for a destructive y/n confirmation during
+  // uninstall/remove. Keep both `1pctl` and `/usr/local/bin/1pctl` on the
+  // native PTY path so the answer never reaches the outer shell.
+  if (firstBase === "1pctl" && /\b(?:uninstall|remove|delete|purge|install|upgrade)\b/.test(normalized)) return true;
   if (/\b(?:vim|vi|nvim|nano|emacs|top|htop|btop|less|more|man|watch|fzf|dialog|whiptail|mysql|mariadb|psql|python|python3|ipython|node|bash|zsh|fish|sftp|ftp)\b/.test(normalized)) return true;
   const words = normalized.split(/\s+/);
   if (words[0] !== "sudo" && words[0] !== "doas") return false;

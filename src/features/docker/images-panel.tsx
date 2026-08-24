@@ -6,6 +6,12 @@ import "./images-panel.css";
 const IMAGE_UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const IMAGE_UPDATE_CACHE_PREFIX = "opsnest.docker.image-update.";
 type CachedImageUpdate = DockerImageUpdateSummary & { checkedAt: number };
+type RunningImageUpgrade = {
+  reference: string;
+  stage: string;
+  layers: DockerLayerProgress[];
+};
+const runningImageUpgrades = new Map<string, RunningImageUpgrade>();
 
 function imageCacheKey(serverId: string) {
   return IMAGE_UPDATE_CACHE_PREFIX + serverId;
@@ -190,11 +196,7 @@ export function ImagesPanel({
   const [upgradeTarget, setUpgradeTarget] = useState<DockerImageSummary | null>(null);
   const [detailTarget, setDetailTarget] = useState<DockerImageSummary | null>(null);
   const [detailContent, setDetailContent] = useState("");
-  const [upgradeProgress, setUpgradeProgress] = useState<{
-    reference: string;
-    stage: string;
-    layers: DockerLayerProgress[];
-  } | null>(null);
+  const [upgradeProgress, setUpgradeProgress] = useState<RunningImageUpgrade | null>(() => runningImageUpgrades.get(serverId) || null);
   const [checkProgress, setCheckProgress] = useState("");
   const progressBufferRef = useRef("");
   const checkBufferRef = useRef("");
@@ -280,13 +282,16 @@ export function ImagesPanel({
         if (parsed.stage) stage = parsed.stage;
       }
       if (!stage && layerProgressRef.current.size) stage = "正在处理镜像层…";
-      setUpgradeProgress((current) => current && current.reference === reference
-        ? {
-            ...current,
-            stage: stage || current.stage,
-            layers: Array.from(layerProgressRef.current.values()),
-          }
-        : current);
+      setUpgradeProgress((current) => {
+        if (!current || current.reference !== reference) return current;
+        const next = {
+          ...current,
+          stage: stage || current.stage,
+          layers: Array.from(layerProgressRef.current.values()),
+        };
+        runningImageUpgrades.set(serverId, next);
+        return next;
+      });
     };
     window.addEventListener("opsnest-docker-image-progress", handleProgress);
     return () => window.removeEventListener("opsnest-docker-image-progress", handleProgress);
@@ -408,7 +413,9 @@ export function ImagesPanel({
     setUpgradeTarget(null);
     progressBufferRef.current = "";
     layerProgressRef.current.clear();
-    setUpgradeProgress({ reference, stage: zhMode ? "连接镜像仓库…" : "Connecting to registry…", layers: [] });
+    const progress: RunningImageUpgrade = { reference, stage: zhMode ? "连接镜像仓库…" : "Connecting to registry…", layers: [] };
+    runningImageUpgrades.set(serverId, progress);
+    setUpgradeProgress(progress);
     const result = await run({
       kind: "image",
       operation: "upgrade",
@@ -417,6 +424,7 @@ export function ImagesPanel({
       composeTargets: target.composeTargets,
     });
     if (!result) {
+      runningImageUpgrades.delete(serverId);
       setUpgradeProgress(null);
       return;
     }
@@ -444,8 +452,20 @@ export function ImagesPanel({
     // instead of forcing the user to click “检查更新” again.
     await refresh();
     await run({ kind: "image", operation: "check" });
+    runningImageUpgrades.delete(serverId);
     setUpgradeProgress(null);
     setMessage(finalMessage);
+  };
+
+  const cancelUpgrade = async () => {
+    const reference = upgradeProgress?.reference;
+    if (!reference) return;
+    const result = await run({ kind: "image", operation: "cancelUpgrade", reference });
+    if (!result) return;
+    runningImageUpgrades.delete(serverId);
+    setUpgradeProgress(null);
+    setMessage(result.message || (zhMode ? "已请求停止镜像升级" : "Image upgrade stop requested"));
+    await refresh();
   };
 
   return (
@@ -467,6 +487,7 @@ export function ImagesPanel({
         <div className="docker-image-progress-heading">
           <strong>{zhMode ? "镜像升级中" : "Image upgrade in progress"}</strong>
           <span title={upgradeProgress.reference}>{upgradeProgress.stage}</span>
+          <button type="button" onClick={() => void cancelUpgrade()} disabled={isBusy(`image:cancelUpgrade:${upgradeProgress.reference}`)}>{zhMode ? "停止升级" : "Stop"}</button>
         </div>
         {upgradeProgress.layers.length ? <div className="docker-image-progress-layers">
           {upgradeProgress.layers.map((layer) => <div className="docker-image-progress-layer" key={layer.id}>

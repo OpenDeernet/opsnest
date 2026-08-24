@@ -406,6 +406,63 @@ pub async fn upload_remote_file(
     Ok(data.len() as u64)
 }
 
+/// Upload bounded bytes over a dedicated SFTP connection. This is used by the
+/// AI workspace transfer tool and deliberately refuses to overwrite an
+/// existing remote file unless the caller explicitly opts in.
+pub async fn upload_remote_bytes(
+    request: &SessionRequest,
+    remote_path: &str,
+    data: &[u8],
+    overwrite: bool,
+) -> Result<u64, String> {
+    let remote_path = remote_path.trim();
+    if remote_path.is_empty() {
+        return Err("remote file path is required".to_string());
+    }
+    if data.len() > 8 * 1024 * 1024 {
+        return Err("workspace upload exceeds the 8 MiB limit".to_string());
+    }
+    let sftp = crate::ssh_session::open_sftp_session(request).await?;
+    if !overwrite && sftp.metadata(remote_path).await.is_ok() {
+        let _ = sftp.close().await;
+        return Err("remote file already exists; set overwrite=true only after confirmation".to_string());
+    }
+    let mut remote = match sftp.create(remote_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = sftp.close().await;
+            return Err(error.to_string());
+        }
+    };
+    let write_result = remote
+        .write_all(data)
+        .await
+        .map_err(|error| error.to_string());
+    let shutdown_result = if write_result.is_ok() {
+        remote.shutdown().await.map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    drop(remote);
+    let close_result = sftp.close().await.map_err(|error| error.to_string());
+    write_result?;
+    shutdown_result?;
+    close_result?;
+    Ok(data.len() as u64)
+}
+
+#[tauri::command]
+pub async fn upload_workspace_file_to_server(
+    request: SessionRequest,
+    workspace_id: String,
+    path: String,
+    remote_path: String,
+    overwrite: Option<bool>,
+) -> Result<u64, String> {
+    let data = crate::workspace::read_workspace_bytes(&workspace_id, path.trim(), 8 * 1024 * 1024)?;
+    upload_remote_bytes(&request, &remote_path, &data, overwrite.unwrap_or(false)).await
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalFileEntry {

@@ -381,6 +381,29 @@ pub fn read_workspace_text(
     }
 }
 
+/// Read a bounded workspace file as bytes for an explicit remote transfer.
+/// Keeping path resolution here prevents an AI-provided relative path from
+/// escaping the per-session workspace.
+pub fn read_workspace_bytes(
+    workspace_id: &str,
+    relative_path: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if max_bytes == 0 {
+        return Err("workspace read limit must be greater than zero".to_string());
+    }
+    let (root, _) = create_workspace(workspace_id)?;
+    let path = resolve_relative_path(&root, relative_path)?;
+    let metadata = fs::metadata(&path).map_err(|error| format!("unable to read workspace file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("workspace path is not a file".to_string());
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(format!("workspace file exceeds the {max_bytes}-byte upload limit"));
+    }
+    fs::read(path).map_err(|error| format!("unable to read workspace file: {error}"))
+}
+
 #[tauri::command]
 pub fn write_workspace_text(
     workspace_id: String,
