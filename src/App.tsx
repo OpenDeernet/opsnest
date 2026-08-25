@@ -625,10 +625,12 @@ function ServiceIcon({
               ? "postgres"
               : key.includes("redis")
                 ? "redis"
-                   : key.includes("mongo")
-                     ? "mongodb"
+                    : key.includes("mongo")
+                      ? "mongodb"
                     : /ntop/.test(key)
                       ? "ntopng"
+                    : key.includes("python")
+                      ? "python"
                     : /openlist|open-list/.test(key)
                      ? "openlist"
                    : key.includes("alist")
