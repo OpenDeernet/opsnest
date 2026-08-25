@@ -703,6 +703,7 @@ function ServiceIcon({
     if (isNamedDockerContainer) return () => {
       active = false;
     };
+    const refreshSuffix = refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : "";
     void (async () => {
       const candidatesToTry = isAlibabaSystem
         ? candidates.filter((candidate) => candidate !== "generic")
@@ -713,7 +714,7 @@ function ServiceIcon({
             // Only SVG is served from the packed directory. PNG artwork is
             // resolved from the online runtime icon directory below.
             if (type === "svg" && !isAlibabaSystem) {
-              const packed = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.svg`;
+              const packed = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.svg${refreshSuffix}`;
               const localResponse = await fetch(packed);
               if (localResponse.ok) {
                 appIconSourceCache.set(resolutionCacheKey, packed);
@@ -721,13 +722,15 @@ function ServiceIcon({
                 return;
               }
             }
-            const bundled = type === "svg" ? bundledIconUrl(directory, candidate, type) : undefined;
+            const bundledBase = type === "svg" ? bundledIconUrl(directory, candidate, type) : undefined;
+            const bundled = bundledBase && refreshSuffix
+              ? `${bundledBase}${bundledBase.includes("?") ? "&" : "?"}${refreshSuffix.slice(1)}`
+              : bundledBase;
             if (bundled) {
               appIconSourceCache.set(resolutionCacheKey, bundled);
               if (active) setRemote(bundled);
               return;
             }
-            const refreshSuffix = refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : "";
             const remoteUrls = [
               `${remoteIconUrl(directory, candidate, type)}${refreshSuffix}`,
               `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
