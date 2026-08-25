@@ -19,7 +19,7 @@ export function iconDirectory(kind: string, name: string): IconDirectory {
   // A router's discovery kind may contain "OpenWrt", but the discovered
   // entry can still be an application/service. Resolve those names before
   // the system-directory fallback so their bundled service icons are used.
-  if (/docker|container|nginx|apache|caddy|openlist|open-list|alist|lucky|luci|uhttpd|dropbear|grafana|portainer|1panel|mysql|mariadb|postgres|redis|mongo|php|node|python|java/.test(name.toLowerCase()))
+  if (/docker|container|nginx|apache|caddy|openlist|open-list|alist|lucky|luci|uhttpd|dropbear|grafana|portainer|1panel|mysql|mariadb|postgres|redis|mongo|php|node|python|java|ntop/.test(name.toLowerCase()))
     return "services";
   return key.includes("system") || key.includes("linux") || key.includes("debian") || key.includes("ubuntu") || key.includes("windows") || /openwrt|istoreos|immortalwrt|router|路由器|fnos|feiniu|macos|darwin|proxmox/.test(key) ? "systems" : "services";
 }

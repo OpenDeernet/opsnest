@@ -625,9 +625,11 @@ function ServiceIcon({
               ? "postgres"
               : key.includes("redis")
                 ? "redis"
-                : key.includes("mongo")
-                  ? "mongodb"
-                   : /openlist|open-list/.test(key)
+                   : key.includes("mongo")
+                     ? "mongodb"
+                    : /ntop/.test(key)
+                      ? "ntopng"
+                    : /openlist|open-list/.test(key)
                      ? "openlist"
                    : key.includes("alist")
                      ? "alist"
@@ -8932,6 +8934,18 @@ function WebServiceDiscoveryPanel({
       const customServices = savedServices.filter((service) =>
         service.id.startsWith("custom-"),
       );
+      const customPorts = new Set(
+        customServices
+          .map((service) => service.portOverride ?? service.port)
+          .filter((port): port is number => typeof port === "number"),
+      );
+      const officialNasPorts = new Set(
+        nasMode
+          ? (server.nas?.apps ?? [])
+              .map((app) => app.port)
+              .filter((port): port is number => typeof port === "number")
+          : [],
+      );
       // A rescan refreshes runtime discovery, but it must not erase the
       // user's saved port/path/label adjustments. Keep those values keyed by
       // the stable service id and apply them on top of the fresh probe result.
@@ -8951,7 +8965,10 @@ function WebServiceDiscoveryPanel({
           port: saved.portOverride ?? service.port,
           portOverride: saved.portOverride,
           webPath: saved.webPath ?? service.webPath,
-          webScheme: saved.webScheme ?? service.webScheme,
+          // The protocol is runtime discovery data. It is not a user-editable
+          // override, so never let a stale saved HTTP value mask a fresh HTTPS
+          // probe (for example on TLS services running on non-standard ports).
+          webScheme: service.webScheme,
           customLabel: saved.customLabel ?? service.customLabel,
         };
       };
@@ -8960,7 +8977,13 @@ function WebServiceDiscoveryPanel({
           .filter((service) => !service.id.startsWith("custom-"))
           .map(withSavedOverrides),
         ...customServices,
-      ];
+      ].filter((service) => {
+        if (service.id.startsWith("custom-")) return true;
+        const port = service.portOverride ?? service.port;
+        if (typeof port !== "number") return true;
+        if (customPorts.has(port)) return false;
+        return !(nasMode && service.id.startsWith("web-port-") && officialNasPorts.has(port));
+      });
       const webServices = merged.filter((service) =>
         isVisibleWebService(service, server.port, hideDocker),
       );

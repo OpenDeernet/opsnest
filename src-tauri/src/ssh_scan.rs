@@ -701,12 +701,65 @@ if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ]; then
 fi
 printf 'FNOS\n'
 if grep -qiE 'fnos|fnnas|飞牛' /etc/os-release /etc/fnos_release /etc/fnos-version /etc/*release 2>/dev/null || [ -d /usr/local/fnos ] || [ -d /var/lib/fnos ] || hostname 2>/dev/null | grep -qiE 'feiniu|fnos|fnnas'; then
-  fnos_port=''
-  for candidate in 5666 8000; do
-    if command -v ss >/dev/null 2>&1 && ss -lntH 2>/dev/null | awk '{print $4}' | grep -E ":${candidate}$" >/dev/null 2>&1; then fnos_port="$candidate"; break; fi
+  fnos_found='no'
+  for candidate in 5666 5667 8000 8001; do
+    if command -v ss >/dev/null 2>&1 && ss -lntH 2>/dev/null | awk '{print $4}' | grep -E ":${candidate}$" >/dev/null 2>&1; then
+      fnos_scheme=http
+      case "$candidate" in 5667|8001) fnos_scheme=https ;; esac
+      printf 'fnos-%s\tFeiniu fnOS\trunning\t%s\t%s\t-\n' "$candidate" "$candidate" "$fnos_scheme"
+      fnos_found=yes
+    fi
   done
-  [ -z "$fnos_port" ] && fnos_port=5666
-  printf 'fnos\tFeiniu fnOS\trunning\t%s\thttp\tpanel\n' "$fnos_port"
+  [ "$fnos_found" = no ] && printf 'fnos-5666\tFeiniu fnOS\trunning\t5666\thttp\t-\n'
+fi"#
+    }
+    fn generic_port_command() -> &'static str {
+        r#"# Probe a bounded set of listening TCP ports so unknown Web services are
+# discoverable without adding an application-specific detector for each one.
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+  listening_services=''
+  if command -v ss >/dev/null 2>&1; then
+    listening_services=$(ss -lntpH 2>/dev/null | awk '{endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); process=$6; sub(/^users:\(\("/, "", process); sub(/".*$/, "", process); if (process == "") process="-"; print port "\t" process "\t" host}' | sort -k1,1n -k2,2 | uniq | head -n 32)
+    [ -z "$listening_services" ] && listening_services=$(ss -lntH 2>/dev/null | awk '{endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); print port "\t-\t" host}' | sort -k1,1n | uniq | head -n 32)
+  elif command -v netstat >/dev/null 2>&1; then
+    listening_services=$(netstat -lntp 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); process=$7; sub(/.*\//, "", process); if (process == "") process="-"; print port "\t" process "\t" host}' | sort -k1,1n -k2,2 | uniq | head -n 32)
+    [ -z "$listening_services" ] && listening_services=$(netstat -lnt 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); print port "\t-\t" host}' | sort -k1,1n | uniq | head -n 32)
+  fi
+  probe_web_port() {
+    _port="$1"; _scheme="$2"; _process="$3"; _bind_host="$4"; _code=''; _content_type=''; _url="${_scheme}://127.0.0.1:${_port}/"
+    if command -v curl >/dev/null 2>&1; then
+      _probe=$(curl -k -sS -L --connect-timeout 1 --max-time 1 -o /dev/null -w '%{http_code}\t%{content_type}' "$_url" 2>/dev/null || true)
+      _code=$(printf '%s' "$_probe" | cut -f 1)
+      _content_type=$(printf '%s' "$_probe" | cut -f 2 | tr '[:upper:]' '[:lower:]')
+    elif command -v wget >/dev/null 2>&1; then
+      _headers=$(wget -S --spider --timeout=1 --tries=1 "$_url" 2>&1 || true)
+      _code=$(printf '%s\n' "$_headers" | sed -nE 's#^.*HTTP/[0-9.]+[[:space:]]+([0-9]{3}).*$#\1#p' | tail -n 1)
+      _content_type=$(printf '%s\n' "$_headers" | sed -nE 's#^[[:space:]]*[Cc]ontent-[Tt]ype:[[:space:]]*([^;[:space:]]+).*$#\1#p' | tail -n 1 | tr '[:upper:]' '[:lower:]')
+    fi
+    case "$_code" in
+      2[0-9][0-9]|3[0-9][0-9]|401|403)
+        case "$_content_type" in
+          text/html*|application/xhtml+xml*)
+            printf 'PORT_SERVICE\t%s\t%s\t%s\t%s\t%s\n' "$_port" "$_scheme" "$_code" "$_process" "$_bind_host"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
+    return 1
+  }
+  printf '%s\n' "$listening_services" | while IFS="$(printf '\t')" read -r port process bind_host; do
+    case "$port" in
+      ''|0|22|53|547|"$OPSNEST_SSH_PORT") continue ;;
+    esac
+    case "$bind_host" in
+      127.*|localhost|::1|\[::1\]|::1%*) continue ;;
+    esac
+    case "$port" in
+      443|8443|9443|10443) probe_web_port "$port" https "$process" "$bind_host" || probe_web_port "$port" http "$process" "$bind_host" || true ;;
+      *) probe_web_port "$port" http "$process" "$bind_host" || probe_web_port "$port" https "$process" "$bind_host" || true ;;
+    esac
+  done
 fi"#
     }
     let sudo_password = request
@@ -716,10 +769,22 @@ fi"#
         .map(shell_quote)
         .unwrap_or_else(|| "''".to_string());
     let command = format!(
-        "OPSNEST_SUDO_PASSWORD={sudo_password}\n{}",
+        "OPSNEST_SUDO_PASSWORD={sudo_password}\nOPSNEST_SSH_PORT={}\n{}",
+        request.port,
         discover_command()
     );
     let raw = execute(&session, &command).await?;
+    let generic_raw = execute(
+        &session,
+        &format!(
+            "OPSNEST_SSH_PORT={}\n{}",
+            request.port,
+            generic_port_command()
+        ),
+    )
+    .await
+    .unwrap_or_default();
+    let raw = format!("{raw}\nPORT\n{generic_raw}");
     let mut services = Vec::new();
     let mut docker_events = Vec::new();
     let mut section = "";
@@ -845,7 +910,7 @@ fi"#
             "fnos" if parts.len() >= 6 => {
                 let port = parts[3].parse::<u16>().ok();
                 services.push(DiscoveredService {
-                    id: "fnos".into(),
+                    id: parts[0].to_string(),
                     name: parts[1].to_string(),
                     kind: "NAS".into(),
                     status: parts[2].to_string(),
@@ -854,6 +919,49 @@ fi"#
                     port_mappings: None,
                     web_path: None,
                     web_scheme: Some(parts[4].to_string()),
+                    version: parts
+                        .get(5)
+                        .filter(|value| !value.is_empty() && **value != "-")
+                        .map(|value| value.to_string()),
+                    docker_root_dir: None,
+                    docker_autostart: None,
+                    docker_capabilities: None,
+                    docker_events: None,
+                });
+            }
+            "port" if parts.len() >= 4 && parts[0] == "PORT_SERVICE" => {
+                let Some(port) = parts[1].parse::<u16>().ok() else {
+                    continue;
+                };
+                if services.iter().any(|service| service.port == Some(port)) {
+                    continue;
+                }
+                let scheme = parts[2];
+                let status_code = parts[3];
+                let process_name = parts
+                    .get(4)
+                    .copied()
+                    .filter(|value| !value.is_empty() && *value != "-");
+                let (name, detail) = match process_name {
+                    Some(process) => (
+                        process.to_string(),
+                        format!("自动发现的监听服务（端口 {port}，{scheme} {status_code}）"),
+                    ),
+                    None => (
+                        format!("HTTP :{port}"),
+                        format!("自动发现的 Web 入口（{scheme} {status_code}）"),
+                    ),
+                };
+                services.push(DiscoveredService {
+                    id: format!("web-port-{port}"),
+                    name,
+                    kind: "Web".into(),
+                    status: "running".into(),
+                    detail,
+                    port: Some(port),
+                    port_mappings: None,
+                    web_path: None,
+                    web_scheme: Some(scheme.to_string()),
                     version: None,
                     docker_root_dir: None,
                     docker_autostart: None,
@@ -861,7 +969,6 @@ fi"#
                     docker_events: None,
                 });
             }
-            "port" => {}
             _ => {}
         }
     }
