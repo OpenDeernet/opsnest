@@ -663,6 +663,7 @@ function ServiceIcon({
     directory === "services" && /openlist|open-list/i.test(name);
   const isLuckyService = directory === "services" && /lucky/i.test(name);
   const isLuciService = directory === "services" && /luci|uhttpd/i.test(name);
+  const isNtopService = directory === "services" && /ntop/i.test(name);
   const isDockerService =
     directory === "services" &&
     /^(docker|container)$/i.test(nameOnly) &&
@@ -675,6 +676,9 @@ function ServiceIcon({
   }, [baseKey, name, directory]);
   const amazonRemoteIcon = isAmazonSystem
     ? `${remoteIconUrl("systems", "amazon", "png")}${refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : ""}`
+    : null;
+  const ntopRemoteIcon = isNtopService
+    ? `${remoteIconUrl("services", "ntopng", "png")}${refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : ""}`
     : null;
   const resolutionCacheKey = `${directory}:${candidates.join("|")}:${refreshKey}`;
   const [remote, setRemote] = React.useState<string | null>(() => {
@@ -761,7 +765,7 @@ function ServiceIcon({
     return () => {
       active = false;
     };
-  }, [amazonRemoteIcon, candidates.join("|"), directory, isAlibabaSystem, isAmazonSystem, isNamedDockerContainer, refreshKey, resolutionCacheKey]);
+  }, [amazonRemoteIcon, candidates.join("|"), directory, isAlibabaSystem, isAmazonSystem, isNamedDockerContainer, ntopRemoteIcon, refreshKey, resolutionCacheKey]);
   if (isNamedDockerContainer)
     return <NamedDockerServiceIcon name={nameOnly} refreshKey={refreshKey} />;
   if (isOpenListService)
@@ -779,6 +783,17 @@ function ServiceIcon({
   if (isLuciService)
     return (
       <CachedRemoteIcon directory="services" candidates={["luci", "uhttpd"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image service-luci" refreshKey={refreshKey} />
+    );
+  if (isNtopService && ntopRemoteIcon)
+    return (
+      <img
+        className="service-icon-image service-ntopng"
+        src={ntopRemoteIcon}
+        alt="ntopng"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
     );
   if (isAlibabaSystem || baseKey === "alibaba")
     return (
