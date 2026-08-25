@@ -725,6 +725,12 @@ if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
     listening_services=$(netstat -lntp 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); process=$7; sub(/.*\//, "", process); if (process == "") process="-"; print port "\t" process "\t" host}' | sort -k1,1n -k2,2 | uniq | head -n 32)
     [ -z "$listening_services" ] && listening_services=$(netstat -lnt 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); print port "\t-\t" host}' | sort -k1,1n | uniq | head -n 32)
   fi
+  is_transport_process() {
+    case "$1" in
+      xray|xray-*|v2ray|v2ray-*|sing-box|singbox|trojan|hysteria|tuic|naiveproxy|clash|mihomo) return 0 ;;
+    esac
+    return 1
+  }
   probe_web_port() {
     _port="$1"; _scheme="$2"; _process="$3"; _bind_host="$4"; _code=''; _content_type=''; _url="${_scheme}://127.0.0.1:${_port}/"
     if command -v curl >/dev/null 2>&1; then
@@ -755,6 +761,7 @@ if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
     case "$bind_host" in
       127.*|localhost|::1|\[::1\]|::1%*) continue ;;
     esac
+    is_transport_process "$process" && continue
     case "$port" in
       443|8443|9443|10443) probe_web_port "$port" https "$process" "$bind_host" || probe_web_port "$port" http "$process" "$bind_host" || true ;;
       *) probe_web_port "$port" http "$process" "$bind_host" || probe_web_port "$port" https "$process" "$bind_host" || true ;;
