@@ -7131,6 +7131,9 @@ function InteractiveTerminalPanel({
     // `Is this ok [y/N]:`). Keep the response on the PTY instead of letting
     // the local line dispatcher interpret `y`/`n` as a question for the AI.
     let confirmationPromptActive = false;
+    let confirmationResponseStarted = false;
+    let confirmationPromptTail = "";
+    let confirmationWriteQueue: Promise<unknown> = Promise.resolve();
     let deferredPromptTail = "";
     let promptTailSettleTimer: number | undefined;
     let finalPromptWaitTimer: number | undefined;
@@ -7164,8 +7167,12 @@ function InteractiveTerminalPanel({
     };
     const detectConfirmationPrompt = (data: string) => {
       const plain = stripTerminalControl(data).replace(/\r/g, "\n");
+      // SSH/PTy output can split a prompt across several chunks (`[y/` then
+      // `n]`). Keep a short tail so the response path is armed even when no
+      // single event contains the complete `[y/n]` suffix.
+      confirmationPromptTail = `${confirmationPromptTail}${plain}`.slice(-512);
       const candidate =
-        plain
+        confirmationPromptTail
           .split("\n")
           .reverse()
           .find((line) => line.trim().length > 0)
@@ -7175,7 +7182,13 @@ function InteractiveTerminalPanel({
           candidate,
         )
       ) {
+        const wasActive = confirmationPromptActive;
         confirmationPromptActive = true;
+        if (!wasActive) {
+          confirmationResponseStarted = false;
+          if (aiOrchestrationActive)
+            updateWorkStatus("executing", "等待远程确认（y/n）");
+        }
         return true;
       }
       return false;
@@ -7184,6 +7197,8 @@ function InteractiveTerminalPanel({
       const prompt = extractTrailingPrompt(data);
       if (!prompt) return null;
       confirmationPromptActive = false;
+      confirmationResponseStarted = false;
+      confirmationPromptTail = "";
       promptRef.current = prompt;
       rememberTerminalPrompt(server.id, prompt);
       promptVersionRef.current += 1;
@@ -7295,6 +7310,8 @@ function InteractiveTerminalPanel({
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
       confirmationPromptActive = false;
+      confirmationResponseStarted = false;
+      confirmationPromptTail = "";
       deferredPromptTail = "";
       pendingAiConclusion = "";
       restorePromptAfterConclusion = false;
@@ -7463,6 +7480,8 @@ function InteractiveTerminalPanel({
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
       confirmationPromptActive = false;
+      confirmationResponseStarted = false;
+      confirmationPromptTail = "";
       deferredPromptTail = "";
       pendingAiConclusion = "";
       restorePromptAfterConclusion = false;
@@ -7530,6 +7549,35 @@ function InteractiveTerminalPanel({
       term.clearSelection();
     };
     term.attachCustomKeyEventHandler((event) => {
+      // A command launched by AI may pause inside the remote program for a
+      // y/n confirmation. Handle the small response vocabulary here, before
+      // the Windows IME gate and xterm dispatch, so a Chinese IME cannot eat
+      // the key and the normal input path cannot queue it behind execution.
+      if (
+        confirmationPromptActive &&
+        event.type === "keydown" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        const key = event.key.toLowerCase();
+        const isYes = key === "y" || event.code === "KeyY";
+        const isNo = key === "n" || event.code === "KeyN";
+        if ((isYes || isNo) && !confirmationResponseStarted) {
+          event.preventDefault();
+          processInputData(isYes ? "y" : "n");
+          return false;
+        }
+        if (key === "enter" || event.code === "Enter") {
+          event.preventDefault();
+          processInputData("\r");
+          return false;
+        }
+        if (isYes || isNo) {
+          event.preventDefault();
+          return false;
+        }
+      }
       if (!imeGate.handleKeyEvent(event)) return false;
       if (
         event.type === "keydown" &&
@@ -8392,9 +8440,23 @@ function InteractiveTerminalPanel({
       if (confirmationPromptActive) {
         // The remote program owns this prompt's echo and line discipline. Do
         // not echo locally or send the response through the AI dispatcher.
-        void write(data);
-        if (data.includes("\r") || data.includes("\n"))
+        const lineBreak = data.includes("\r") || data.includes("\n");
+        if (!lineBreak && confirmationResponseStarted) return;
+        if (!lineBreak && /^(?:y|n)$/i.test(data))
+          confirmationResponseStarted = true;
+        confirmationWriteQueue = confirmationWriteQueue
+          .then(() =>
+            invoke("write_interactive_ssh_terminal_response", {
+              sessionId: sessionRef.current,
+              data,
+            }),
+          )
+          .catch((reason) => setError(String(reason)));
+        if (lineBreak) {
           confirmationPromptActive = false;
+          confirmationResponseStarted = false;
+          confirmationPromptTail = "";
+        }
         return;
       }
       if (rawPtyModeRef.current) {

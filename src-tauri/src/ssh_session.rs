@@ -516,10 +516,10 @@ pub async fn open_interactive_ssh_terminal(
     Ok(true)
 }
 
-#[tauri::command]
-pub async fn write_interactive_ssh_terminal(
+async fn write_interactive_ssh_terminal_data(
     session_id: String,
     data: String,
+    wait_for_execution: bool,
 ) -> Result<(), String> {
     let shell = interactive()
         .lock()
@@ -532,9 +532,10 @@ pub async fn write_interactive_ssh_terminal(
     if !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
         append_blackboard(&shell, "user_input", normalized);
     }
-    // Ctrl+C must still interrupt an in-flight remote command. Ordinary
-    // terminal input waits until an AI command owns and releases the PTY.
-    let _execution = if data == "\x03" {
+    // Ctrl+C and responses to a remote confirmation prompt must still reach
+    // an in-flight command. Ordinary terminal input waits until an AI command
+    // owns and releases the PTY so a second shell command cannot interleave.
+    let _execution = if !wait_for_execution || data == "\x03" {
         None
     } else {
         Some(shell.execution.lock().await)
@@ -547,6 +548,33 @@ pub async fn write_interactive_ssh_terminal(
         .await
         .map_err(|error| error.to_string());
     result
+}
+
+#[tauri::command]
+pub async fn write_interactive_ssh_terminal(
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    write_interactive_ssh_terminal_data(session_id, data, true).await
+}
+
+/// Write a response to a prompt owned by the command currently running in the
+/// interactive PTY. This intentionally bypasses the command execution guard:
+/// waiting for that guard would queue `y`/`n` until the command times out, at
+/// which point the shell receives the stale characters as a new command.
+#[tauri::command]
+pub async fn write_interactive_ssh_terminal_response(
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    if data.is_empty()
+        || data
+            .chars()
+            .any(|character| !matches!(character, 'y' | 'Y' | 'n' | 'N' | '\r' | '\n'))
+    {
+        return Err("SSH terminal response must contain only y/n or Enter".to_string());
+    }
+    write_interactive_ssh_terminal_data(session_id, data, false).await
 }
 
 pub fn record_session_event(
