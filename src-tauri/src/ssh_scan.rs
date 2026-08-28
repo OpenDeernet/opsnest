@@ -667,9 +667,9 @@ if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
 fi
 printf 'SYSTEMD\n'; for service in nginx apache2 httpd caddy; do if command -v "$service" >/dev/null 2>&1; then status=stopped; systemctl is-active --quiet "$service" 2>/dev/null && status=running; port=$(ss -ltn 2>/dev/null | awk '$4 ~ /:(80|443|8080|8443)$/ {sub(/^.*:/,"",$4); print $4; exit}'); [ -n "$port" ] && printf '%s\t%s\t%s\t%s\n' "$service" "$status" "$port" "$service"; fi; done
 printf 'OPENWRT\n'
-if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ]; then
+if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ] || command -v ubus >/dev/null 2>&1 || [ -r /etc/config/uhttpd ]; then
   for service in uhttpd dropbear dnsmasq odhcpd rpcd netifd firewall hostapd wpa_supplicant miniupnpd mwan3 sqm adblock banip ddns tailscale wireguard openclash passwall openlist lucky; do
-    if [ -x "/etc/init.d/$service" ]; then
+    if [ -x "/etc/init.d/$service" ] || { [ "$service" = uhttpd ] && { pidof uhttpd >/dev/null 2>&1 || [ -r /etc/config/uhttpd ]; }; }; then
       status=installed
       "/etc/init.d/$service" running >/dev/null 2>&1 && status=running
       [ "$status" = installed ] && pidof "$service" >/dev/null 2>&1 && status=running
@@ -679,6 +679,8 @@ if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ]; then
           name='LuCI / uHTTPd'; category=panel
           https_port=$(uci -q get uhttpd.main.listen_https 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
           http_port=$(uci -q get uhttpd.main.listen_http 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+          [ -z "$https_port" ] && [ -r /etc/config/uhttpd ] && https_port=$(grep -E '^[[:space:]]*list[[:space:]]+listen_https' /etc/config/uhttpd 2>/dev/null | sed -nE 's/.*:([0-9]+).*/\1/p' | head -n 1)
+          [ -z "$http_port" ] && [ -r /etc/config/uhttpd ] && http_port=$(grep -E '^[[:space:]]*list[[:space:]]+listen_http' /etc/config/uhttpd 2>/dev/null | sed -nE 's/.*:([0-9]+).*/\1/p' | head -n 1)
           if [ -n "$https_port" ]; then port="$https_port"; scheme=https
           elif [ -n "$http_port" ]; then port="$http_port"
           else port=80; fi
@@ -716,7 +718,7 @@ fi"#
     fn generic_port_command() -> &'static str {
         r#"# Probe a bounded set of listening TCP ports so unknown Web services are
 # discoverable without adding an application-specific detector for each one.
-if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || [ -r /proc/net/tcp ] || [ -r /proc/net/tcp6 ]; then
   listening_services=''
   if command -v ss >/dev/null 2>&1; then
     listening_services=$(ss -lntpH 2>/dev/null | awk '{endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); process=$6; sub(/^users:\(\("/, "", process); sub(/".*$/, "", process); if (process == "") process="-"; print port "\t" process "\t" host}' | sort -k1,1n -k2,2 | uniq | head -n 32)
@@ -724,6 +726,41 @@ if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
   elif command -v netstat >/dev/null 2>&1; then
     listening_services=$(netstat -lntp 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); process=$7; sub(/.*\//, "", process); if (process == "") process="-"; print port "\t" process "\t" host}' | sort -k1,1n -k2,2 | uniq | head -n 32)
     [ -z "$listening_services" ] && listening_services=$(netstat -lnt 2>/dev/null | awk 'NR > 2 {endpoint=$4; port=endpoint; sub(/^.*:/, "", port); host=endpoint; if (endpoint ~ /^\[[^]]+\]:[0-9]+$/) sub(/:[0-9]+$/, "", host); else sub(/:[^:]+$/, "", host); print port "\t-\t" host}' | sort -k1,1n | uniq | head -n 32)
+  fi
+  # BusyBox builds often ship an ss binary with a reduced option set, or no
+  # ss/netstat at all. /proc/net/tcp is available to an unprivileged SSH user
+  # and still exposes every LISTEN socket, so use it as the portable fallback.
+  if [ -z "$listening_services" ] && [ -r /proc/net/tcp ]; then
+    listening_services=$(awk '
+      function hex_digit(value, position, digit) {
+        digit=index("0123456789ABCDEF", substr(value, position, 1)) - 1
+        return digit < 0 ? 0 : digit
+      }
+      function hex_byte(value) { return hex_digit(value, 1) * 16 + hex_digit(value, 2) }
+      function ipv4(value) {
+        return hex_byte(substr(value, 7, 2)) "." hex_byte(substr(value, 5, 2)) "." hex_byte(substr(value, 3, 2)) "." hex_byte(substr(value, 1, 2))
+      }
+      NR > 1 && $4 == "0A" {
+        split($2, endpoint, ":")
+        address = endpoint[1]
+        port = hex_byte(substr(endpoint[2], 1, 2)) * 256 + hex_byte(substr(endpoint[2], 3, 2))
+        print port "\t-\t" ipv4(address)
+      }
+    ' /proc/net/tcp | sort -k1,1n | uniq | head -n 32)
+  fi
+  if [ -z "$listening_services" ] && [ -r /proc/net/tcp6 ]; then
+    listening_services=$(awk '
+      function hex_digit(value, position, digit) {
+        digit=index("0123456789ABCDEF", substr(value, position, 1)) - 1
+        return digit < 0 ? 0 : digit
+      }
+      function hex_byte(value) { return hex_digit(value, 1) * 16 + hex_digit(value, 2) }
+      NR > 1 && $4 == "0A" {
+        split($2, endpoint, ":")
+        port = hex_byte(substr(endpoint[2], 1, 2)) * 256 + hex_byte(substr(endpoint[2], 3, 2))
+        print port "\t-\t::"
+      }
+    ' /proc/net/tcp6 | sort -k1,1n | uniq | head -n 32)
   fi
   is_transport_process() {
     case "$1" in
