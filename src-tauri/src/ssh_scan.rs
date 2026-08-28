@@ -806,6 +806,34 @@ if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1 || [ -r /
   done
 fi"#
     }
+    // Dropbear/BusyBox based iStoreOS builds can reject the larger discovery
+    // script before it produces any output. Keep a deliberately small probe
+    // for the platform's built-in uHTTPd/LuCI service. It only uses files and
+    // commands that are present on OpenWrt-family systems, and emits the same
+    // tab-separated shape as the main OPENWRT section so the normal parser can
+    // consume it without a platform-specific frontend path.
+    fn compact_openwrt_command() -> &'static str {
+        r#"printf 'OPENWRT\n'
+if [ -r /etc/config/uhttpd ] || [ -d /www/cgi-bin/luci ] || [ -d /www/luci-static ] || [ -x /etc/init.d/uhttpd ] || pidof uhttpd >/dev/null 2>&1 || ps 2>/dev/null | grep -v grep | grep '[u]httpd' >/dev/null 2>&1; then
+  status=installed
+  if [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd running >/dev/null 2>&1; then status=running; fi
+  pidof uhttpd >/dev/null 2>&1 || ps 2>/dev/null | grep -v grep | grep '[u]httpd' >/dev/null 2>&1 && status=running
+  https_port=''; http_port=''
+  if command -v uci >/dev/null 2>&1; then
+    https_port=$(uci -q get uhttpd.main.listen_https 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+    http_port=$(uci -q get uhttpd.main.listen_http 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+  fi
+  [ -z "$https_port" ] && [ -r /etc/config/uhttpd ] && https_port=$(sed -nE '/^[[:space:]]*list[[:space:]]+listen_https/s/.*:([0-9]+).*/\1/p' /etc/config/uhttpd 2>/dev/null | head -n 1)
+  [ -z "$http_port" ] && [ -r /etc/config/uhttpd ] && http_port=$(sed -nE '/^[[:space:]]*list[[:space:]]+listen_http/s/.*:([0-9]+).*/\1/p' /etc/config/uhttpd 2>/dev/null | head -n 1)
+  if [ -n "$https_port" ]; then
+    printf 'openwrt-uhttpd\tLuCI / uHTTPd\t%s\t%s\thttps\tpanel\n' "$status" "$https_port"
+  elif [ -n "$http_port" ]; then
+    printf 'openwrt-uhttpd\tLuCI / uHTTPd\t%s\t%s\thttp\tpanel\n' "$status" "$http_port"
+  else
+    printf 'openwrt-uhttpd\tLuCI / uHTTPd\t%s\t80\thttp\tpanel\n' "$status"
+  fi
+fi"#
+    }
     let sudo_password = request
         .sudo_password
         .as_deref()
@@ -817,7 +845,10 @@ fi"#
         request.port,
         discover_command()
     );
-    let raw = execute(&session, &command).await?;
+    // Treat a rejected/truncated long command as an empty result. The compact
+    // fallback below can still recover the built-in router panel and keeps a
+    // single problematic probe from hiding all discovered services.
+    let raw = execute(&session, &command).await.unwrap_or_default();
     let generic_raw = execute(
         &session,
         &format!(
@@ -828,7 +859,17 @@ fi"#
     )
     .await
     .unwrap_or_default();
-    let raw = format!("{raw}\nPORT\n{generic_raw}");
+    let compact_raw = if !raw.contains("openwrt-uhttpd\t") {
+        execute(
+            &session,
+            &format!("OPSNEST_SSH_PORT={}\n{}", request.port, compact_openwrt_command()),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let raw = format!("{raw}\n{compact_raw}\nPORT\n{generic_raw}");
     let mut services = Vec::new();
     let mut docker_events = Vec::new();
     let mut section = "";
@@ -1153,4 +1194,5 @@ mod tests {
         .expect("container should be retained");
         assert_eq!(service.port, Some(3300));
     }
+
 }
