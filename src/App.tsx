@@ -9103,13 +9103,17 @@ function WebServiceDiscoveryPanel({
     void scan();
   }, [scan]);
   React.useEffect(() => {
-    const refreshDockerState = (event: Event) => {
+    const refreshServices = (event: Event) => {
       const serverId = (event as CustomEvent<{ serverId?: string }>).detail?.serverId;
       if (serverId && serverId !== server.id) return;
       void scan();
     };
-    window.addEventListener("opsnest-refresh-docker-state", refreshDockerState);
-    return () => window.removeEventListener("opsnest-refresh-docker-state", refreshDockerState);
+    window.addEventListener("opsnest-refresh-services", refreshServices);
+    window.addEventListener("opsnest-refresh-docker-state", refreshServices);
+    return () => {
+      window.removeEventListener("opsnest-refresh-services", refreshServices);
+      window.removeEventListener("opsnest-refresh-docker-state", refreshServices);
+    };
   }, [scan, server.id]);
   const updateService = (
     id: string,
@@ -9760,6 +9764,15 @@ function App() {
                 window.dispatchEvent(
                   new CustomEvent("opsnest-open-ssh", {
                     detail: { serverId: id, reconnect: true },
+                  }),
+                ),
+              0,
+            );
+            window.setTimeout(
+              () =>
+                window.dispatchEvent(
+                  new CustomEvent("opsnest-refresh-services", {
+                    detail: { serverId: id },
                   }),
                 ),
               0,
