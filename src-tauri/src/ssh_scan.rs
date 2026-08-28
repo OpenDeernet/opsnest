@@ -813,7 +813,28 @@ fi"#
     // tab-separated shape as the main OPENWRT section so the normal parser can
     // consume it without a platform-specific frontend path.
     fn compact_openwrt_command() -> &'static str {
-        r#"printf 'OPENWRT\n'
+        r#"printf 'DOCKER\n'
+container_exec() {
+  if command -v docker >/dev/null 2>&1; then
+    docker "$@" 2>/dev/null && return 0
+    sudo -n docker "$@" 2>/dev/null && return 0
+    [ -n "$OPSNEST_SUDO_PASSWORD" ] && printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' docker "$@" 2>/dev/null && return 0
+  elif command -v podman >/dev/null 2>&1; then
+    podman "$@" 2>/dev/null && return 0
+    sudo -n podman "$@" 2>/dev/null && return 0
+    [ -n "$OPSNEST_SUDO_PASSWORD" ] && printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' podman "$@" 2>/dev/null && return 0
+  fi
+  return 1
+}
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  docker_status=stopped
+  container_exec info >/dev/null 2>&1 && docker_status=running
+  docker_version=$(container_exec version --format '{{.Server.Version}}' 2>/dev/null | head -n 1)
+  [ -z "$docker_version" ] && docker_version=$(container_exec --version 2>/dev/null | head -n 1)
+  printf 'DOCKER_SERVICE\t%s\t%s\t\tunknown\tunknown\t\n' "$docker_status" "$docker_version"
+  container_exec ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null || true
+fi
+printf 'OPENWRT\n'
 if [ -r /etc/config/uhttpd ] || [ -d /www/cgi-bin/luci ] || [ -d /www/luci-static ] || [ -x /etc/init.d/uhttpd ] || pidof uhttpd >/dev/null 2>&1 || ps 2>/dev/null | grep -v grep | grep '[u]httpd' >/dev/null 2>&1; then
   status=installed
   if [ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd running >/dev/null 2>&1; then status=running; fi
@@ -832,6 +853,20 @@ if [ -r /etc/config/uhttpd ] || [ -d /www/cgi-bin/luci ] || [ -d /www/luci-stati
   else
     printf 'openwrt-uhttpd\tLuCI / uHTTPd\t%s\t80\thttp\tpanel\n' "$status"
   fi
+  # Keep the short fallback useful when the full package scan is rejected:
+  # expose installed router applications whose init scripts define stable
+  # browser entry points. This is generic across OpenWrt derivatives and does
+  # not assume a Docker-specific container name.
+  for service in lucky openlist; do
+    if [ -x "/etc/init.d/$service" ]; then
+      status=installed
+      "/etc/init.d/$service" running >/dev/null 2>&1 && status=running
+      case "$service" in
+        lucky) printf 'openwrt-lucky\tLucky\t%s\t16601\thttp\tpanel\n' "$status" ;;
+        openlist) printf 'openwrt-openlist\tOpenList\t%s\t5244\thttp\tpanel\n' "$status" ;;
+      esac
+    fi
+  done
 fi"#
     }
     let sudo_password = request
@@ -850,7 +885,11 @@ fi"#
     // probe first guarantees that a rejected long script cannot hide LuCI.
     let compact_probe_raw = execute(
         &session,
-        &format!("OPSNEST_SSH_PORT={}\n{}", request.port, compact_openwrt_command()),
+        &format!(
+            "OPSNEST_SUDO_PASSWORD={sudo_password}\nOPSNEST_SSH_PORT={}\n{}",
+            request.port,
+            compact_openwrt_command()
+        ),
     )
     .await
     .unwrap_or_default();
@@ -871,7 +910,11 @@ fi"#
     let compact_fallback_raw = if !raw.contains("openwrt-uhttpd\t") && compact_probe_raw.is_empty() {
         execute(
             &session,
-            &format!("OPSNEST_SSH_PORT={}\n{}", request.port, compact_openwrt_command()),
+            &format!(
+                "OPSNEST_SUDO_PASSWORD={sudo_password}\nOPSNEST_SSH_PORT={}\n{}",
+                request.port,
+                compact_openwrt_command()
+            ),
         )
         .await
         .unwrap_or_default()
