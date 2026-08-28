@@ -9750,8 +9750,20 @@ function App() {
                   : item,
               ),
             );
-            // “连接” only verifies reachability and credentials. Opening an
-            // interactive PTY belongs to the separate SSH context-menu action.
+            // The connection action must also revive a terminal that was
+            // closed remotely. Reuse the existing tab when possible, but ask
+            // TerminalWorkspace to tear down the stale PTY and create a fresh
+            // one instead of merely focusing the old terminal surface.
+            if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
+            window.setTimeout(
+              () =>
+                window.dispatchEvent(
+                  new CustomEvent("opsnest-open-ssh", {
+                    detail: { serverId: id, reconnect: true },
+                  }),
+                ),
+              0,
+            );
             void writeDebugLog("info", "SSH connection verified", {
               serverId: id,
             });
