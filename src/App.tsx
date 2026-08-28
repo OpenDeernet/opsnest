@@ -6473,7 +6473,7 @@ function TerminalWorkspace({
   }, [editorTab, onSelectEditor, onSelectTerminal, tabIds.length]);
   React.useEffect(() => {
     const reopen = (event: Event) => {
-      const detail = (event as CustomEvent<{ serverId?: string; reconnect?: boolean }>).detail;
+      const detail = (event as CustomEvent<{ serverId?: string; reconnect?: boolean; activate?: boolean }>).detail;
       const requested = detail?.serverId;
       const target =
         (requested && servers.find((item) => item.id === requested)) || server;
@@ -6488,7 +6488,7 @@ function TerminalWorkspace({
               current.includes(target.id) ? current : [...current, target.id],
             );
             setFocusedId(target.id);
-            onSelectTerminal?.();
+            if (detail.activate !== false) onSelectTerminal?.();
             setTerminalGeneration((value) => value + 1);
           });
         return;
@@ -9758,12 +9758,11 @@ function App() {
             // closed remotely. Reuse the existing tab when possible, but ask
             // TerminalWorkspace to tear down the stale PTY and create a fresh
             // one instead of merely focusing the old terminal surface.
-            if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
             window.setTimeout(
               () =>
                 window.dispatchEvent(
                   new CustomEvent("opsnest-open-ssh", {
-                    detail: { serverId: id, reconnect: true },
+                    detail: { serverId: id, reconnect: true, activate: false },
                   }),
                 ),
               0,
