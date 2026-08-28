@@ -845,8 +845,17 @@ fi"#
         request.port,
         discover_command()
     );
+    // Probe the small, platform-neutral router entry first. Some Dropbear
+    // configurations limit concurrent/long exec channels; running this short
+    // probe first guarantees that a rejected long script cannot hide LuCI.
+    let compact_probe_raw = execute(
+        &session,
+        &format!("OPSNEST_SSH_PORT={}\n{}", request.port, compact_openwrt_command()),
+    )
+    .await
+    .unwrap_or_default();
     // Treat a rejected/truncated long command as an empty result. The compact
-    // fallback below can still recover the built-in router panel and keeps a
+    // probe above can still recover the built-in router panel and keeps a
     // single problematic probe from hiding all discovered services.
     let raw = execute(&session, &command).await.unwrap_or_default();
     let generic_raw = execute(
@@ -859,7 +868,7 @@ fi"#
     )
     .await
     .unwrap_or_default();
-    let compact_raw = if !raw.contains("openwrt-uhttpd\t") {
+    let compact_fallback_raw = if !raw.contains("openwrt-uhttpd\t") && compact_probe_raw.is_empty() {
         execute(
             &session,
             &format!("OPSNEST_SSH_PORT={}\n{}", request.port, compact_openwrt_command()),
@@ -868,6 +877,11 @@ fi"#
         .unwrap_or_default()
     } else {
         String::new()
+    };
+    let compact_raw = if compact_probe_raw.is_empty() {
+        compact_fallback_raw
+    } else {
+        compact_probe_raw
     };
     let raw = format!("{raw}\n{compact_raw}\nPORT\n{generic_raw}");
     let mut services = Vec::new();
