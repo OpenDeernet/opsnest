@@ -74,6 +74,7 @@ import {
 } from "./features/docker/docker-panel";
 import dockerIcon from "../icons/packed/services/docker.svg";
 import dockerIconMarkup from "../icons/packed/services/docker.svg?raw";
+import ubuntuIcon from "../icons/packed/systems/ubuntu.svg";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -806,6 +807,17 @@ function ServiceIcon({
   if (isFnosSystem)
     return (
       <CachedRemoteIcon directory="systems" candidates={["fnos"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image system-fnos" refreshKey={refreshKey} />
+    );
+  if (directory === "systems" && baseKey === "ubuntu")
+    return (
+      <img
+        className="service-icon-image system-ubuntu"
+        src={ubuntuIcon}
+        alt="Ubuntu"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
     );
   if (remote)
     return (
@@ -9045,6 +9057,9 @@ function WebServiceDiscoveryPanel({
   );
   const [serviceIconRefreshKey, setServiceIconRefreshKey] = React.useState(0);
   const effectiveIconRefreshKey = Math.max(iconRefreshKey, serviceIconRefreshKey);
+  const scanRunRef = React.useRef(0);
+  const activeServerIdRef = React.useRef(server.id);
+  activeServerIdRef.current = server.id;
   const [state, setState] = React.useState("正在扫描");
   const serviceLabel = hideDocker ? "路由器服务" : "服务";
   const serviceTitle = hideDocker ? "内置服务与管理入口" : "常用入口";
@@ -9072,6 +9087,9 @@ function WebServiceDiscoveryPanel({
   );
   savedServicesRef.current = server.services ?? [];
   const scan = React.useCallback(async (refreshIcons = false) => {
+    const scanRun = ++scanRunRef.current;
+    const isCurrentScan = () =>
+      scanRun === scanRunRef.current && activeServerIdRef.current === server.id;
     setState("正在扫描");
     // A rescan is also the explicit signal to re-read user-added packed
     // icons. Keep the service row keys stable, but make each icon resolver
@@ -9111,6 +9129,10 @@ function WebServiceDiscoveryPanel({
           },
         },
       );
+      // The panel instance is reused when switching between Linux servers.
+      // Never let a slower scan from the previously selected server overwrite
+      // the current server's services or saved overrides.
+      if (!isCurrentScan()) return;
       const cleaned = result.filter(
         (service) => !(service.id === "1panel" && service.port === server.port),
       );
@@ -9186,6 +9208,8 @@ function WebServiceDiscoveryPanel({
         })),
       });
     } catch (reason) {
+      if (scanRun !== scanRunRef.current || activeServerIdRef.current !== server.id)
+        return;
       setState(`扫描失败：${String(reason)}`);
       void writeDebugLog("error", "service discovery failed", {
         serverId: server.id,
@@ -9201,6 +9225,18 @@ function WebServiceDiscoveryPanel({
     hideDocker,
     onServicesUpdated,
   ]);
+  React.useEffect(() => {
+    // Reset the view immediately on a server switch. Otherwise React reuses
+    // the Linux home component and briefly displays the previous server's
+    // discovery cards while the new scan is in flight.
+    scanRunRef.current += 1;
+    setServices(
+      (server.services ?? []).filter((service) =>
+        isVisibleWebService(service, server.port, hideDocker),
+      ),
+    );
+    setState("正在扫描");
+  }, [server.id, hideDocker]);
   React.useEffect(() => {
     void scan();
   }, [scan]);
