@@ -7155,6 +7155,7 @@ function InteractiveTerminalPanel({
     // `Is this ok [y/N]:`). Keep the response on the PTY instead of letting
     // the local line dispatcher interpret `y`/`n` as a question for the AI.
     let confirmationPromptActive = false;
+    let confirmationPromptKind: "yn" | "sudo-password" | null = null;
     let confirmationResponseStarted = false;
     let confirmationPromptTail = "";
     let confirmationWriteQueue: Promise<unknown> = Promise.resolve();
@@ -7208,11 +7209,30 @@ function InteractiveTerminalPanel({
       ) {
         const wasActive = confirmationPromptActive;
         confirmationPromptActive = true;
+        confirmationPromptKind = "yn";
         if (!wasActive) {
           confirmationResponseStarted = false;
           if (aiOrchestrationActive)
             updateWorkStatus("executing", "等待远程确认（y/n）");
         }
+        return true;
+      }
+      // A non-interactive AI command can still reach a real sudo password
+      // prompt when no local sudo credential is configured (or when the
+      // cached one is rejected). Route this prompt to the remote PTY without
+      // treating the password as an AI line. Keep the pattern deliberately
+      // narrow so ordinary command output containing the word "password" is
+      // not mistaken for an input prompt.
+      if (
+        /^\s*(?:\[\s*sudo\s*\]\s*)?(?:password|passwd|passphrase|口令|密码)(?:\s+for\s+[^:]{1,160})?\s*:\s*$/i.test(
+          candidate,
+        )
+      ) {
+        const wasActive = confirmationPromptActive;
+        confirmationPromptActive = true;
+        confirmationPromptKind = "sudo-password";
+        if (!wasActive && aiOrchestrationActive)
+          updateWorkStatus("executing", "等待输入 sudo 密码");
         return true;
       }
       return false;
@@ -7221,6 +7241,7 @@ function InteractiveTerminalPanel({
       const prompt = extractTrailingPrompt(data);
       if (!prompt) return null;
       confirmationPromptActive = false;
+      confirmationPromptKind = null;
       confirmationResponseStarted = false;
       confirmationPromptTail = "";
       promptRef.current = prompt;
@@ -7334,6 +7355,7 @@ function InteractiveTerminalPanel({
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
       confirmationPromptActive = false;
+      confirmationPromptKind = null;
       confirmationResponseStarted = false;
       confirmationPromptTail = "";
       deferredPromptTail = "";
@@ -7512,6 +7534,7 @@ function InteractiveTerminalPanel({
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
       confirmationPromptActive = false;
+      confirmationPromptKind = null;
       confirmationResponseStarted = false;
       confirmationPromptTail = "";
       deferredPromptTail = "";
@@ -7587,6 +7610,7 @@ function InteractiveTerminalPanel({
       // the key and the normal input path cannot queue it behind execution.
       if (
         confirmationPromptActive &&
+        confirmationPromptKind === "yn" &&
         event.type === "keydown" &&
         !event.ctrlKey &&
         !event.metaKey &&
@@ -7629,7 +7653,8 @@ function InteractiveTerminalPanel({
       if (
         event.type === "keydown" &&
         event.key === "Backspace" &&
-        !event.isComposing
+        !event.isComposing &&
+        (!confirmationPromptActive || confirmationPromptKind !== "sudo-password")
       ) {
         // Interactive programs own their own line editor (readline, Hermes,
         // Python, etc.). Do not consume Backspace in the AI-SSH local editor;
@@ -7648,6 +7673,7 @@ function InteractiveTerminalPanel({
       if (
         event.type === "keydown" &&
         !rawPtyModeRef.current &&
+        (!confirmationPromptActive || confirmationPromptKind !== "sudo-password") &&
         ["ArrowLeft", "ArrowRight", "Home", "End", "Delete"].includes(event.key)
       ) {
         // The AI editor is a single append-only line. Do not let xterm move
@@ -8469,7 +8495,47 @@ function InteractiveTerminalPanel({
       },
     });
     processInputData = (data) => {
-      if (confirmationPromptActive) {
+      if (
+        confirmationPromptActive &&
+        confirmationPromptKind === "sudo-password"
+      ) {
+        // Password input is deliberately invisible locally.  It bypasses the
+        // AI dispatcher and the blackboard, while Enter still uses the
+        // restricted y/n response command.  Handle bracketed paste as well,
+        // otherwise xterm's paste markers would become part of the password.
+        const unwrapped = data
+          .replace(/\x1b\[200~/g, "")
+          .replace(/\x1b\[201~/g, "");
+        const breakIndex = unwrapped.search(/[\r\n]/);
+        const lineBreak = breakIndex >= 0;
+        const password = lineBreak ? unwrapped.slice(0, breakIndex) : unwrapped;
+        if (password) {
+          confirmationWriteQueue = confirmationWriteQueue
+            .then(() =>
+              invoke("write_interactive_ssh_terminal_password", {
+                sessionId: sessionRef.current,
+                data: password,
+              }),
+            )
+            .catch((reason) => setError(String(reason)));
+        }
+        if (lineBreak) {
+          confirmationWriteQueue = confirmationWriteQueue
+            .then(() =>
+              invoke("write_interactive_ssh_terminal_response", {
+                sessionId: sessionRef.current,
+                data: "\r",
+              }),
+            )
+            .catch((reason) => setError(String(reason)));
+          confirmationPromptActive = false;
+          confirmationPromptKind = null;
+          confirmationResponseStarted = false;
+          confirmationPromptTail = "";
+        }
+        return;
+      }
+      if (confirmationPromptActive && confirmationPromptKind === "yn") {
         // The remote program owns this prompt's echo and line discipline. Do
         // not echo locally or send the response through the AI dispatcher.
         const lineBreak = data.includes("\r") || data.includes("\n");
@@ -8486,6 +8552,7 @@ function InteractiveTerminalPanel({
           .catch((reason) => setError(String(reason)));
         if (lineBreak) {
           confirmationPromptActive = false;
+          confirmationPromptKind = null;
           confirmationResponseStarted = false;
           confirmationPromptTail = "";
         }

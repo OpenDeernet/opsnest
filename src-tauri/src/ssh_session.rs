@@ -520,6 +520,7 @@ async fn write_interactive_ssh_terminal_data(
     session_id: String,
     data: String,
     wait_for_execution: bool,
+    record_input: bool,
 ) -> Result<(), String> {
     let shell = interactive()
         .lock()
@@ -529,7 +530,7 @@ async fn write_interactive_ssh_terminal_data(
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
     touch_activity(&shell);
     let normalized = data.replace('\r', "").replace('\n', "");
-    if !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
+    if record_input && !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
         append_blackboard(&shell, "user_input", normalized);
     }
     // Ctrl+C and responses to a remote confirmation prompt must still reach
@@ -555,7 +556,7 @@ pub async fn write_interactive_ssh_terminal(
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    write_interactive_ssh_terminal_data(session_id, data, true).await
+    write_interactive_ssh_terminal_data(session_id, data, true, true).await
 }
 
 /// Write a response to a prompt owned by the command currently running in the
@@ -574,7 +575,27 @@ pub async fn write_interactive_ssh_terminal_response(
     {
         return Err("SSH terminal response must contain only y/n or Enter".to_string());
     }
-    write_interactive_ssh_terminal_data(session_id, data, false).await
+    write_interactive_ssh_terminal_data(session_id, data, false, true).await
+}
+
+/// Write a password to a remote prompt without recording it in the terminal
+/// blackboard or waiting behind the command that is currently asking for it.
+/// The terminating Enter is sent through `write_interactive_ssh_terminal_response`
+/// so this endpoint can never submit a password as a shell command.
+#[tauri::command]
+pub async fn write_interactive_ssh_terminal_password(
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    if data.is_empty()
+        || data.len() > 4096
+        || data
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n'))
+    {
+        return Err("SSH terminal password input is invalid".to_string());
+    }
+    write_interactive_ssh_terminal_data(session_id, data, false, false).await
 }
 
 pub fn record_session_event(
