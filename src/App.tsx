@@ -8495,6 +8495,12 @@ function InteractiveTerminalPanel({
       },
     });
     processInputData = (data) => {
+      // xterm enables bracketed paste, which wraps a pasted line in control
+      // markers. Those markers are terminal protocol, not command content;
+      // strip them before prompt handling or command classification so a
+      // pasted `sudo ...` line cannot be misrouted to AI as free-form text.
+      data = data.replace(/\x1b\[200~/g, "").replace(/\x1b\[201~/g, "");
+      if (!data) return;
       if (
         confirmationPromptActive &&
         confirmationPromptKind === "sudo-password"
@@ -8503,12 +8509,9 @@ function InteractiveTerminalPanel({
         // AI dispatcher and the blackboard, while Enter still uses the
         // restricted y/n response command.  Handle bracketed paste as well,
         // otherwise xterm's paste markers would become part of the password.
-        const unwrapped = data
-          .replace(/\x1b\[200~/g, "")
-          .replace(/\x1b\[201~/g, "");
-        const breakIndex = unwrapped.search(/[\r\n]/);
+        const breakIndex = data.search(/[\r\n]/);
         const lineBreak = breakIndex >= 0;
-        const password = lineBreak ? unwrapped.slice(0, breakIndex) : unwrapped;
+        const password = lineBreak ? data.slice(0, breakIndex) : data;
         if (password) {
           confirmationWriteQueue = confirmationWriteQueue
             .then(() =>
