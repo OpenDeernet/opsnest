@@ -6906,16 +6906,40 @@ const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
   return `opsnest-terminal-buffer:${sessionId}`;
 }
+function stripTransientTerminalStatus(value: string) {
+  // The green AI line is a local progress indicator, not remote terminal
+  // output. It must never survive a tab switch/reload, otherwise a completed
+  // request can look like a still-running operation when the PTY is restored.
+  return value.replace(
+    /(?:\x1b\[[0-9;]*m)?•\s*AI\s*正在处理(?:…|\.\.\.)(?:\x1b\[[0-9;]*m)?/gu,
+    "",
+  );
+}
 function terminalPromptStorageKey(sessionId: string) {
   return `opsnest-terminal-prompt:${sessionId}`;
 }
 function readTerminalOutput(sessionId: string) {
   const cached = terminalBuffers.get(sessionId);
-  if (cached) return cached;
+  if (cached) {
+    const cleaned = stripTransientTerminalStatus(cached);
+    if (cleaned !== cached) {
+      terminalBuffers.set(sessionId, cleaned);
+      try {
+        window.sessionStorage.setItem(terminalBufferStorageKey(sessionId), cleaned);
+      } catch {
+        /* storage is best effort */
+      }
+    }
+    return cleaned;
+  }
   try {
     const stored = window.sessionStorage.getItem(terminalBufferStorageKey(sessionId)) ?? "";
-    if (stored) terminalBuffers.set(sessionId, stored);
-    return stored;
+    const cleaned = stripTransientTerminalStatus(stored);
+    if (cleaned !== stored) {
+      terminalBuffers.set(sessionId, cleaned);
+      window.sessionStorage.setItem(terminalBufferStorageKey(sessionId), cleaned);
+    } else if (stored) terminalBuffers.set(sessionId, stored);
+    return cleaned;
   } catch {
     return "";
   }
@@ -7230,7 +7254,7 @@ function InteractiveTerminalPanel({
       // that as an empty command and emits a duplicate prompt.
       const plain = data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
       const promptText = plain.replace(/\r/g, "\n");
-      if (persist) rememberTerminalOutput(server.id, data);
+      if (persist) rememberTerminalOutput(server.id, stripTransientTerminalStatus(data));
       const prompt = observePrompt ? detectTrailingPrompt(data) : null;
       if (observePrompt && activeCommandRef.current && plain.trim()) {
         activeCommandOutputRef.current += `${promptText}\n`;
@@ -7413,6 +7437,14 @@ function InteractiveTerminalPanel({
           started: startedToolMarkers.size,
           completed: completedToolMarkers.size,
         });
+        // The model request can still be waiting on the same PTY command when
+        // its completion marker is missing. Cancel that backend turn before
+        // releasing the local orchestration state; otherwise a late response
+        // can look like a second, phantom AI operation after the user submits
+        // another line.
+        void invoke("cancel_ai_ssh_chat", {
+          sessionId: sessionRef.current,
+        }).catch(() => undefined);
         const lateTail = deferredPromptTail;
         if (!aiConclusionRendered && pendingAiConclusion) {
           render(pendingAiConclusion);
