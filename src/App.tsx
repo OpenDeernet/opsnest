@@ -7332,14 +7332,12 @@ function InteractiveTerminalPanel({
     const renderRawPty = (data: string, persist = true) => {
       if (persist) rememberTerminalOutput(server.id, data);
       detectTrailingPrompt(data);
-      // Follow live output only when the user was already at the bottom.
-      // Hermes can emit many cursor-controlled chunks; unconditionally
-      // calling scrollToBottom after each chunk makes any manual scrollback
-      // jump back to the latest line immediately.
-      const followOutput =
-        term.buffer.active.viewportY >= term.buffer.active.baseY;
+      // xterm owns the viewport for raw PTY programs. It automatically keeps
+      // the cursor visible as the buffer grows, while preserving user
+      // scrollback and honoring Hermes' cursor/alternate-screen sequences.
+      // Do not call scrollToBottom here: doing so after every output chunk
+      // breaks applications that maintain their own terminal layout.
       term.write(data, () => {
-        if (followOutput) term.scrollToBottom();
         term.refresh(0, term.rows - 1);
       });
     };
