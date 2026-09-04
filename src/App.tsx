@@ -7332,8 +7332,14 @@ function InteractiveTerminalPanel({
     const renderRawPty = (data: string, persist = true) => {
       if (persist) rememberTerminalOutput(server.id, data);
       detectTrailingPrompt(data);
+      // Follow live output only when the user was already at the bottom.
+      // Hermes can emit many cursor-controlled chunks; unconditionally
+      // calling scrollToBottom after each chunk makes any manual scrollback
+      // jump back to the latest line immediately.
+      const followOutput =
+        term.buffer.active.viewportY >= term.buffer.active.baseY;
       term.write(data, () => {
-        term.scrollToBottom();
+        if (followOutput) term.scrollToBottom();
         term.refresh(0, term.rows - 1);
       });
     };
