@@ -9929,7 +9929,11 @@ function App() {
         );
         return;
       }
-      if (target)
+      if (target) {
+        // Mount the target server's TerminalWorkspace before dispatching the
+        // reconnect event. When the user starts from Home or another server,
+        // no target workspace exists to receive a global open-ssh event yet.
+        if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
         void (async () => {
           const at = target.host.indexOf("@");
           const username = at > 0 ? target.host.slice(0, at) : "root";
@@ -9966,7 +9970,7 @@ function App() {
               () =>
                 window.dispatchEvent(
                   new CustomEvent("opsnest-open-ssh", {
-                    detail: { serverId: id, reconnect: true, activate: false },
+                    detail: { serverId: id, reconnect: true },
                   }),
                 ),
               0,
@@ -9997,6 +10001,7 @@ function App() {
             });
           }
         })();
+      }
       return;
     }
     if (next.startsWith("__delete:")) {
