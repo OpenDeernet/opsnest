@@ -1,6 +1,6 @@
 use russh::{client, keys, ChannelMsg};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -460,7 +460,11 @@ pub async fn inspect_linux_server(request: ScanRequest) -> Result<ScanResult, St
 }
 
 fn docker_management_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
-    if parts.len() < 7 || parts[0] != "DOCKER_SERVICE" {
+    // The compact compatibility probe may have its trailing empty fields
+    // removed by shell/transport trimming. The management record is still
+    // valid with just its status and version, so do not let it fall through
+    // and appear as a fake `DOCKER_SERVICE` container.
+    if parts.len() < 3 || parts[0] != "DOCKER_SERVICE" {
         return None;
     }
     Some(DiscoveredService {
@@ -474,11 +478,32 @@ fn docker_management_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
         web_path: None,
         web_scheme: None,
         version: (!parts[2].is_empty()).then(|| parts[2].to_string()),
-        docker_root_dir: (!parts[3].is_empty()).then(|| parts[3].to_string()),
-        docker_autostart: (!parts[4].is_empty()).then(|| parts[4].to_string()),
-        docker_capabilities: Some(parts[6].to_string()),
+        docker_root_dir: parts
+            .get(3)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
+        docker_autostart: parts
+            .get(4)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
+        docker_capabilities: parts
+            .get(6)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string()),
         docker_events: None,
     })
+}
+
+fn deduplicate_discovered_services(services: Vec<DiscoveredService>) -> Vec<DiscoveredService> {
+    let mut seen = HashSet::new();
+    services
+        .into_iter()
+        // This sentinel is only emitted by the management probe. If an
+        // older/trimmed record ever bypasses the parser above, it must never
+        // be shown as a real container.
+        .filter(|service| service.id != "docker-DOCKER_SERVICE")
+        .filter(|service| seen.insert(service.id.clone()))
+        .collect()
 }
 
 fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
@@ -1201,12 +1226,15 @@ fi"#,
             });
         }
     }
-    Ok(services)
+    Ok(deduplicate_discovered_services(services))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{docker_service_from_parts, OPENWRT_ROUTER_PROBE};
+    use super::{
+        deduplicate_discovered_services, docker_management_from_parts,
+        docker_service_from_parts, OPENWRT_ROUTER_PROBE,
+    };
 
     #[test]
     fn openwrt_probe_uses_runtime_network_and_client_sources() {
@@ -1252,4 +1280,33 @@ mod tests {
         assert_eq!(service.port, Some(3300));
     }
 
+    #[test]
+    fn docker_management_accepts_trimmed_compact_probe_record() {
+        let service = docker_management_from_parts(&["DOCKER_SERVICE", "running", "29.7.2"])
+            .expect("trimmed management record should remain a Docker service");
+        assert_eq!(service.id, "docker");
+        assert_eq!(service.version.as_deref(), Some("29.7.2"));
+    }
+
+    #[test]
+    fn discovery_deduplicates_probe_overlap_by_stable_id() {
+        let first = docker_service_from_parts(&["app", "Up 1 minute", "example/app"])
+            .expect("first container should be retained");
+        let duplicate = docker_service_from_parts(&["app", "Up 2 minutes", "example/app"])
+            .expect("duplicate container should parse");
+        let management = docker_management_from_parts(&["DOCKER_SERVICE", "running", "29.7.2"])
+            .expect("management record should parse");
+        let duplicate_management =
+            docker_management_from_parts(&["DOCKER_SERVICE", "running", "29.7.2"])
+                .expect("duplicate management record should parse");
+        let services = deduplicate_discovered_services(vec![
+            management,
+            first,
+            duplicate,
+            duplicate_management,
+        ]);
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0].id, "docker");
+        assert_eq!(services[1].id, "docker-app");
+    }
 }
