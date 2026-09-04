@@ -8694,7 +8694,6 @@ function InteractiveTerminalPanel({
       window.requestAnimationFrame(() => {
         if (disposed) return;
         resize();
-        term.scrollToBottom();
       });
     });
     hostResizeObserver.observe(host);
