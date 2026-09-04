@@ -6913,6 +6913,7 @@ function isRiskyShellCommand(input: string) {
 }
 const terminalBuffers = new Map<string, string>();
 const terminalPrompts = new Map<string, string>();
+const terminalRawModes = new Map<string, boolean>();
 const remoteCommandCache = new Map<string, boolean>();
 const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
@@ -6929,6 +6930,29 @@ function stripTransientTerminalStatus(value: string) {
 }
 function terminalPromptStorageKey(sessionId: string) {
   return `opsnest-terminal-prompt:${sessionId}`;
+}
+function terminalRawModeStorageKey(sessionId: string) {
+  return `opsnest-terminal-raw-mode:${sessionId}`;
+}
+function readTerminalRawMode(sessionId: string) {
+  const cached = terminalRawModes.get(sessionId);
+  if (cached !== undefined) return cached;
+  try {
+    const stored = window.sessionStorage.getItem(terminalRawModeStorageKey(sessionId));
+    const value = stored === "1";
+    if (stored !== null) terminalRawModes.set(sessionId, value);
+    return value;
+  } catch {
+    return false;
+  }
+}
+function rememberTerminalRawMode(sessionId: string, active: boolean) {
+  terminalRawModes.set(sessionId, active);
+  try {
+    window.sessionStorage.setItem(terminalRawModeStorageKey(sessionId), active ? "1" : "0");
+  } catch {
+    /* storage is best effort */
+  }
 }
 function readTerminalOutput(sessionId: string) {
   const cached = terminalBuffers.get(sessionId);
@@ -6990,9 +7014,11 @@ function rememberTerminalOutput(sessionId: string, data: string) {
 function clearTerminalOutput(sessionId: string) {
   terminalBuffers.delete(sessionId);
   terminalPrompts.delete(sessionId);
+  terminalRawModes.delete(sessionId);
   try {
     window.sessionStorage.removeItem(terminalBufferStorageKey(sessionId));
     window.sessionStorage.removeItem(terminalPromptStorageKey(sessionId));
+    window.sessionStorage.removeItem(terminalRawModeStorageKey(sessionId));
   } catch {
     /* storage is best effort */
   }
@@ -7177,6 +7203,7 @@ function InteractiveTerminalPanel({
     let toolRaceGraceTimer: number | undefined;
     let toolBarrierWaitTimer: number | undefined;
     let suppressLatePromptOnce = false;
+    let rawOutputTraceCount = 0;
     let orchestrationGeneration = 0;
     let pendingAiConclusion = "";
     let restorePromptAfterConclusion = false;
@@ -7337,9 +7364,10 @@ function InteractiveTerminalPanel({
       // scrollback and honoring Hermes' cursor/alternate-screen sequences.
       // Do not call scrollToBottom here: doing so after every output chunk
       // breaks applications that maintain their own terminal layout.
-      term.write(data, () => {
-        term.refresh(0, term.rows - 1);
-      });
+      // xterm's write queue already redraws the affected cells. An explicit
+      // full refresh here races cursor-addressed TUI output and can make a
+      // native alternate-screen app look like split scrollback.
+      term.write(data);
     };
     const clearPromptTailSettleTimer = () => {
       if (promptTailSettleTimer !== undefined) {
@@ -7562,7 +7590,25 @@ function InteractiveTerminalPanel({
       terminalOperationInFlight = true;
     };
     const previous = readTerminalOutput(server.id);
-    if (previous) render(previous, false);
+    // Before raw-mode state was persisted, a Hermes session could already
+    // have left alternate-screen/cursor bytes in the buffer. Recognize that
+    // legacy buffer and migrate it to the native replay path once, otherwise
+    // a dev remount would keep showing the old broken transcript forever.
+    const previousLooksLikeRawPty =
+      /\x1b\[\?(?:47|1047|1049)[hl]/.test(previous) ||
+      /\x1b\[\??(?:\d{1,4}(?:;\d{1,4})*)?[ABCDEFGHfJK]/.test(previous);
+    const previousRawPtyMode =
+      Boolean(previous) && (readTerminalRawMode(server.id) || previousLooksLikeRawPty);
+    rawPtyModeRef.current = previousRawPtyMode;
+    if (previousLooksLikeRawPty && !readTerminalRawMode(server.id))
+      rememberTerminalRawMode(server.id, true);
+    // Raw PTY programs emit cursor-addressed bytes. Replaying those bytes
+    // through TranscriptRuntime would reproduce the old broken scrollback on
+    // every tab switch or dev remount, so restore them through xterm directly.
+    if (previous) {
+      if (previousRawPtyMode) term.write(previous);
+      else render(previous, false);
+    }
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
     const hostName = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -8374,6 +8420,15 @@ function InteractiveTerminalPanel({
           render("\r\n\x1b[31m[SSH connection closed]\x1b[0m\r\n");
         } else if (rawPtyModeRef.current) {
           const rawData = event.payload.data;
+          if (rawOutputTraceCount < 5) {
+            rawOutputTraceCount += 1;
+            void writeDebugLog("debug", "AI-SSH raw PTY output", {
+              serverId: server.id,
+              length: rawData.length,
+              hasAnsi: /\x1b/.test(rawData),
+              hasCarriageReturn: /\r/.test(rawData),
+            });
+          }
           renderRawPty(rawData);
           // Ctrl+C may produce several redraw/control chunks before the
           // shell prompt returns. Keep raw PTY rendering active until that
@@ -8387,6 +8442,7 @@ function InteractiveTerminalPanel({
           ) {
             rawPtyExitRequestedRef.current = false;
             rawPtyModeRef.current = false;
+            rememberTerminalRawMode(server.id, false);
           }
         }
         else {
@@ -8442,8 +8498,15 @@ function InteractiveTerminalPanel({
       });
     const dispatcher = new TerminalDispatcher({
       writeCommand: (command) => {
-        if (classifyInteractiveShellCommand(command)) {
+        const interactive = classifyInteractiveShellCommand(command);
+        void writeDebugLog("debug", "AI-SSH command dispatch", {
+          serverId: server.id,
+          commandHead: command.trim().split(/\s+/, 1)[0] ?? "",
+          interactive,
+        });
+        if (interactive) {
           rawPtyModeRef.current = true;
+          rememberTerminalRawMode(server.id, true);
           inputRef.current = "";
         }
         void write(`${command}\r`);
