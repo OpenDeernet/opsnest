@@ -164,6 +164,11 @@ const dockerActionQueues = new Map<string, Promise<void>>();
 // Keep the short-lived SSH channel for the currently running Docker action so
 // a panel that was closed/reopened can still interrupt a stuck image pull.
 const activeDockerActionSessions = new Map<string, { sessionId: string; action: DockerPanelAction }>();
+// An interactive terminal is the authoritative owner of a server's live SSH
+// state. Background probes (system scans, service discovery, and the file
+// manager) can fail independently while that PTY remains usable, so they must
+// not downgrade the server badge until the terminal itself closes.
+const activeInteractiveSshServers = new Set<string>();
 async function withDockerActionLock<T>(serverId: string, task: () => Promise<T>): Promise<T> {
   const previous = dockerActionQueues.get(serverId) || Promise.resolve();
   let release!: () => void;
@@ -6490,6 +6495,7 @@ function TerminalWorkspace({
       const target =
         (requested && servers.find((item) => item.id === requested)) || server;
       if (detail?.reconnect === true) {
+        activeInteractiveSshServers.delete(target.id);
         intentionallyClosedSessions.add(target.id);
         void invoke("close_interactive_ssh_terminal", {
           sessionId: target.id,
@@ -6519,6 +6525,7 @@ function TerminalWorkspace({
       const requested = (event as CustomEvent<{ serverId?: string }>).detail
         ?.serverId;
       if (!requested || !tabIds.includes(requested)) return;
+      activeInteractiveSshServers.delete(requested);
       intentionallyClosedSessions.add(requested);
       void invoke("close_interactive_ssh_terminal", {
         sessionId: requested,
@@ -6585,6 +6592,7 @@ function TerminalWorkspace({
     const id = closeTarget?.id;
     setCloseTarget(null);
     if (!id) return;
+    activeInteractiveSshServers.delete(id);
     const nextTabs = tabIds.filter((item) => item !== id);
     setTabIds(nextTabs);
     if (focusedId === id) setFocusedId(nextTabs[0] ?? "");
@@ -8411,6 +8419,10 @@ function InteractiveTerminalPanel({
           resetAiOrchestration();
           clearTerminalOutput(server.id);
           promptRef.current = "";
+          // The PTY itself has closed, so release the authoritative live-SSH
+          // marker before notifying the App. Auxiliary failures are ignored
+          // only while this marker is present.
+          activeInteractiveSshServers.delete(server.id);
           if (!intentionallyClosedSessions.has(sessionRef.current))
             window.dispatchEvent(
               new CustomEvent("opsnest-server-connection-state", {
@@ -8477,15 +8489,18 @@ function InteractiveTerminalPanel({
             });
           return;
         }
-        if (created)
-          window.dispatchEvent(
-            new CustomEvent("opsnest-server-connection-state", {
-              detail: { serverId: server.id, connected: true, connectionError: false },
-            }),
-          );
+        // `created === false` means the backend already had a live session.
+        // Both cases are connected from the UI's point of view.
+        activeInteractiveSshServers.add(server.id);
+        window.dispatchEvent(
+          new CustomEvent("opsnest-server-connection-state", {
+            detail: { serverId: server.id, connected: true, connectionError: false },
+          }),
+        );
       })
       .catch((reason) => {
         if (disposed) return;
+        activeInteractiveSshServers.delete(server.id);
         window.dispatchEvent(
           new CustomEvent("opsnest-server-connection-state", {
             detail: { serverId: server.id, connected: false, connectionError: true },
@@ -9700,6 +9715,7 @@ function App() {
       // from the navigation context menu. Always release the backend PTY at
       // the application boundary so a later reconnect cannot hit a stale
       // session id.
+      activeInteractiveSshServers.delete(serverId);
       intentionallyClosedSessions.add(serverId);
       void invoke("close_interactive_ssh_terminal", {
         sessionId: serverId,
@@ -9914,6 +9930,7 @@ function App() {
         // The context-menu action is a real disconnect, not another
         // connection probe. Closing the bottom terminal unmounts its panel
         // and releases the interactive SSH session through its cleanup path.
+        activeInteractiveSshServers.delete(id);
         window.dispatchEvent(
           new CustomEvent("opsnest-disconnect-server", {
             detail: { serverId: id },
@@ -9967,7 +9984,7 @@ function App() {
           } catch (error) {
             setServers((current) =>
               current.map((item) =>
-                item.id === id
+                item.id === id && !activeInteractiveSshServers.has(id)
                   ? { ...item, connected: false, connectionError: true }
                   : item,
               ),
@@ -10654,6 +10671,15 @@ function App() {
   );
   const updateConnectionState = React.useCallback(
     (serverId: string, connected: boolean, connectionError = false) => {
+      if (!connected && activeInteractiveSshServers.has(serverId)) {
+        // A live interactive PTY outranks auxiliary SFTP/scan probes. Those
+        // probes may time out independently while the terminal still works.
+        void writeDebugLog("debug", "ignored SSH state downgrade while interactive session is active", {
+          serverId,
+          connectionError,
+        });
+        return;
+      }
       setServers((current) =>
         current.map((item) =>
           item.id === serverId
@@ -10779,7 +10805,9 @@ function App() {
     } catch (error) {
       setServers((current) =>
         current.map((item) =>
-          item.id === server.id
+          item.id === server.id &&
+          !item.connected &&
+          !activeInteractiveSshServers.has(server.id)
             ? { ...item, connected: false, connectionError: true }
             : item,
         ),
