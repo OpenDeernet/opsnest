@@ -9930,10 +9930,9 @@ function App() {
         return;
       }
       if (target) {
-        // Mount the target server's TerminalWorkspace before dispatching the
-        // reconnect event. When the user starts from Home or another server,
-        // no target workspace exists to receive a global open-ssh event yet.
-        if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
+        // “连接” only verifies reachability and credentials. Opening an SSH
+        // terminal belongs to the separate “SSH” context-menu action or the
+        // server page's “打开终端” button; do not emit an open-ssh event here.
         void (async () => {
           const at = target.host.indexOf("@");
           const username = at > 0 ? target.host.slice(0, at) : "root";
@@ -9961,28 +9960,6 @@ function App() {
                   ? { ...item, connected: true, connectionError: false }
                   : item,
               ),
-            );
-            // The connection action must also revive a terminal that was
-            // closed remotely. Reuse the existing tab when possible, but ask
-            // TerminalWorkspace to tear down the stale PTY and create a fresh
-            // one instead of merely focusing the old terminal surface.
-            window.setTimeout(
-              () =>
-                window.dispatchEvent(
-                  new CustomEvent("opsnest-open-ssh", {
-                    detail: { serverId: id, reconnect: true },
-                  }),
-                ),
-              0,
-            );
-            window.setTimeout(
-              () =>
-                window.dispatchEvent(
-                  new CustomEvent("opsnest-refresh-services", {
-                    detail: { serverId: id },
-                  }),
-                ),
-              0,
             );
             void writeDebugLog("info", "SSH connection verified", {
               serverId: id,
