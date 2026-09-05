@@ -105,6 +105,10 @@ function isRunning(status: string) {
   return /^(?:up|running|healthy)\b/i.test(status.trim());
 }
 
+function isRestarting(status: string) {
+  return /^restarting\b/i.test(status.trim());
+}
+
 function isComposeProjectRunning(status: string) {
   const normalized = status.trim();
   return /^(?:up|running|healthy)\b/i.test(normalized) && !/(?:exited|stopped|unbuilt|未构建)/i.test(normalized);
@@ -275,6 +279,7 @@ export function DockerPanel({
             <div className="docker-panel-container-grid">
               {filteredContainers.map((container) => {
                 const running = isRunning(container.status);
+                const restarting = isRestarting(container.status);
                 const url = serviceUrl(server, container);
                 return (
                   <article className="docker-panel-container" key={container.id}>
@@ -282,8 +287,8 @@ export function DockerPanel({
                     <div className="docker-panel-container-main">
                       <strong>{container.name}</strong>
                       <span>{container.version || container.detail || (zhMode ? "镜像信息未知" : "Image unavailable")}</span>
-                      <small className={running ? "is-running" : "is-stopped"}>
-                        ● {running ? (zhMode ? "运行中" : "Running") : (zhMode ? "已停止" : "Stopped")}
+                      <small className={restarting ? "is-transitioning" : running ? "is-running" : "is-stopped"}>
+                        ● {restarting ? (zhMode ? "重启中" : "Restarting") : running ? (zhMode ? "运行中" : "Running") : (zhMode ? "已停止" : "Stopped")}
                         {container.port ? ` · ${zhMode ? "端口" : "Port"} ${container.port}` : ""}
                       </small>
                     </div>
@@ -350,6 +355,7 @@ export function DockerManagementPanel({
   const [containerFeedbackName, setContainerFeedbackName] = useState<string | null>(null);
   const [localRunning, setLocalRunning] = useState<boolean | undefined>(undefined);
   const [localContainerRunning, setLocalContainerRunning] = useState<Record<string, boolean>>({});
+  const [localContainerTransition, setLocalContainerTransition] = useState<Record<string, "starting" | "stopping" | "restarting">>({});
   const [serviceTransition, setServiceTransition] = useState<"starting" | "stopping" | null>(null);
   const [autostartTransition, setAutostartTransition] = useState<"starting" | "stopping" | null>(null);
   const [localRootDir, setLocalRootDir] = useState("");
@@ -444,6 +450,7 @@ export function DockerManagementPanel({
   useEffect(() => {
     setLocalRunning(undefined);
     setLocalContainerRunning({});
+    setLocalContainerTransition({});
     setServiceTransition(null);
     setAutostartTransition(null);
     setLocalRootDir("");
@@ -467,6 +474,17 @@ export function DockerManagementPanel({
     if (action.kind === "autostart") {
       setLocalAutostart(action.enabled ? "enabled" : "disabled");
       setAutostartTransition(action.enabled ? "starting" : "stopping");
+    }
+    if (action.kind === "container") {
+      const transition = action.operation === "restart"
+        ? "restarting"
+        : action.operation === "start"
+          ? "starting"
+          : action.operation === "stop"
+            ? "stopping"
+            : null;
+      if (transition)
+        setLocalContainerTransition((current) => ({ ...current, [action.name]: transition }));
     }
     const delayedRefresh = () => {
       window.setTimeout(() => {
@@ -502,6 +520,12 @@ export function DockerManagementPanel({
         setAutostartTransition(null);
       }
     } finally {
+      if (action.kind === "container")
+        setLocalContainerTransition((current) => {
+          const next = { ...current };
+          delete next[action.name];
+          return next;
+        });
       window.clearTimeout(timeoutId);
       setActionBusy(null);
     }
@@ -745,6 +769,14 @@ export function DockerManagementPanel({
           {filteredContainers.map((container) => {
             const url = serviceUrl(server, container);
             const running = isContainerRunning(container);
+            const transition = localContainerTransition[container.name] || (isRestarting(container.status) ? "restarting" : undefined);
+            const transitionLabel = transition === "starting"
+              ? (zhMode ? "启动中" : "Starting")
+              : transition === "stopping"
+                ? (zhMode ? "停止中" : "Stopping")
+                : transition === "restarting"
+                  ? (zhMode ? "重启中" : "Restarting")
+                  : null;
             const mappings = container.portMappings?.length
               ? container.portMappings
               : container.port
@@ -757,8 +789,8 @@ export function DockerManagementPanel({
                 <div className="docker-management-row-main">
                   <strong>{container.name}</strong>
                   <span>{container.version || container.detail || (zhMode ? "镜像信息未知" : "Image unavailable")}</span>
-                  <small className={running ? "is-running" : "is-stopped"}>
-                    ● {running ? (zhMode ? "运行中" : "Running") : (zhMode ? "已停止" : "Stopped")}
+                  <small className={transition ? "is-transitioning" : running ? "is-running" : "is-stopped"}>
+                    ● {transitionLabel || (running ? (zhMode ? "运行中" : "Running") : (zhMode ? "已停止" : "Stopped"))}
                     {container.port ? ` · ${zhMode ? "端口" : "Port"} ${container.port}` : ""}
                   </small>
                   {mappings.length > 0 && <span className="docker-management-ports">{mappings.join(" · ")}</span>}

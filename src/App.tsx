@@ -7073,6 +7073,10 @@ function InteractiveTerminalPanel({
   // bytes and ANSI control sequences on the native xterm path until Ctrl+C.
   const rawPtyModeRef = React.useRef(false);
   const rawPtyExitRequestedRef = React.useRef(false);
+  // Some shell menu scripts use `read` while the AI terminal keeps PTY echo
+  // disabled. Their numeric choice reaches the server but is invisible, so
+  // echo only the short menu response locally while that prompt is active.
+  const rawMenuInputRef = React.useRef(false);
   const promptRef = React.useRef(readTerminalPrompt(server.id));
   const promptVersionRef = React.useRef(0);
   const pendingRef = React.useRef<string | null>(null);
@@ -7212,6 +7216,7 @@ function InteractiveTerminalPanel({
     let toolBarrierWaitTimer: number | undefined;
     let suppressLatePromptOnce = false;
     let rawOutputTraceCount = 0;
+    let rawMenuPromptTail = "";
     let orchestrationGeneration = 0;
     let pendingAiConclusion = "";
     let restorePromptAfterConclusion = false;
@@ -7225,6 +7230,17 @@ function InteractiveTerminalPanel({
       data
         .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
         .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+    const detectRawMenuPrompt = (data: string) => {
+      const plain = stripTerminalControl(data).replace(/\r/g, "\n");
+      rawMenuPromptTail = `${rawMenuPromptTail}${plain}`.slice(-512);
+      const candidate = rawMenuPromptTail.split("\n").at(-1)?.trimEnd() ?? "";
+      const menuPrompt =
+        /(?:请输入|请选择|输入(?:选项|数字|编号)|选择|enter|select|choice|option)[^\n]{0,120}(?:\[\s*\d+\s*[-–~\/]\s*\d+\s*\]|\b\d+\s*[-–~\/]\s*\d+\b)\s*:?\s*$/i.test(
+          candidate,
+        );
+      if (menuPrompt) rawMenuInputRef.current = true;
+      return menuPrompt;
+    };
     const extractTrailingPrompt = (data: string) => {
       const plain = stripTerminalControl(data);
       const promptText = plain.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -7366,6 +7382,7 @@ function InteractiveTerminalPanel({
     };
     const renderRawPty = (data: string, persist = true) => {
       if (persist) rememberTerminalOutput(server.id, data);
+      detectRawMenuPrompt(data);
       detectTrailingPrompt(data);
       // xterm owns the viewport for raw PTY programs. It automatically keeps
       // the cursor visible as the buffer grows, while preserving user
@@ -8660,6 +8677,30 @@ function InteractiveTerminalPanel({
         // interactive program owns the PTY. xterm/PTY must receive the exact
         // byte stream so readline, Hermes and full-screen apps can handle it.
         void write(data);
+        if (rawMenuInputRef.current) {
+          // The PTY is intentionally allocated with ECHO disabled for the
+          // AI line editor. A menu program's `read` still accepts the choice,
+          // but its digits are otherwise invisible. Echo only printable menu
+          // characters locally; all other interactive programs remain fully
+          // native and are not double-rendered.
+          let visible = "";
+          for (const character of data) {
+            if (character === "\r" || character === "\n") {
+              if (visible) term.write(visible);
+              visible = "";
+              term.write("\r\n");
+              rawMenuInputRef.current = false;
+              rawMenuPromptTail = "";
+            } else if (character === "\x7f" || character === "\b") {
+              if (visible) term.write(visible);
+              visible = "";
+              term.write("\b \b");
+            } else if (character >= " " && character !== "\x7f") {
+              visible += character;
+            }
+          }
+          if (visible) term.write(visible);
+        }
         return;
       }
       if (terminalOperationInFlight) {
@@ -8674,24 +8715,24 @@ function InteractiveTerminalPanel({
         return;
       }
       // Bracketed paste delivers the whole clipboard payload in one onData
-      // event. Preserve its line structure and submit it as one dispatcher
-      // request when the payload ends with a newline; do not dispatch each
-      // pasted line independently.
+      // event. Preserve its line structure, but never treat the clipboard's
+      // trailing newline as an Enter key. The user must explicitly press
+      // Enter before a pasted command is dispatched.
       if (data.length > 1 && /[\r\n]/.test(data)) {
         const normalized = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const submits = normalized.endsWith("\n");
-        const body = submits ? normalized.slice(0, -1) : normalized;
+        const body = normalized.replace(/\n+$/g, "");
         inputRef.current += body;
         term.write(body.replace(/\n/g, "\r\n"), () => {
           term.scrollToBottom();
           term.refresh(0, term.rows - 1);
         });
-        if (submits) {
-          const block = inputRef.current.trim();
-          inputRef.current = "";
-          term.write("\r\n");
-          if (block) void dispatcher.dispatch(block);
-        }
+        void writeDebugLog("debug", "AI-SSH clipboard paste", {
+          serverId: server.id,
+          length: data.length,
+          lines: normalized.split("\n").length,
+          trailingLineBreak: normalized.endsWith("\n"),
+          submitted: false,
+        });
         return;
       }
       if (data === "\r" || data === "\n") {
@@ -8738,6 +8779,8 @@ function InteractiveTerminalPanel({
         // Ctrl+C without an xterm selection is a real interrupt, not an AI
         // message. Clear the local editable line and send ETX to the PTY.
         inputRef.current = "";
+        rawMenuInputRef.current = false;
+        rawMenuPromptTail = "";
         void write("\x03");
         if (rawPtyModeRef.current) rawPtyExitRequestedRef.current = true;
         return;
