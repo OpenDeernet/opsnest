@@ -2957,6 +2957,7 @@ function ServerManagerPage({
   const [securityNotice, setSecurityNotice] = React.useState<string | null>(
     null,
   );
+  const managerChatBodyRef = React.useRef<HTMLDivElement>(null);
   const [pendingApproval, setPendingApproval] = React.useState<{
     kind: "command" | "config";
     title: string;
@@ -3022,6 +3023,10 @@ function ServerManagerPage({
   React.useEffect(() => {
     if (managerChatHydrated.current) void persistManagerChat(messages);
   }, [messages]);
+  React.useLayoutEffect(() => {
+    const body = managerChatBodyRef.current;
+    if (body) body.scrollTop = body.scrollHeight;
+  }, [messages.length]);
   const aiConfigured = Boolean(
     activeModel.baseUrl.trim() && activeModel.model.trim(),
   );
@@ -4011,7 +4016,7 @@ function ServerManagerPage({
   };
   return (
     <div className="manager-chat-page">
-      <div className="manager-chat-body">
+      <div ref={managerChatBodyRef} className="manager-chat-body">
         {securityNotice && (
           <div className="manager-security-notice" role="alert">
             <span>{securityNotice}</span>
