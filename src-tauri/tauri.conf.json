@@ -19,7 +19,11 @@
         "minHeight": 520,
         "center": true,
         "decorations": false,
-        "resizable": true
+        "resizable": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["acrylic"]
+        }
       }
     ],
     "security": {

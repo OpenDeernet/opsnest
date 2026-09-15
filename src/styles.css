@@ -3,7 +3,7 @@
   font-family: "Noto Sans SC Variable", "Noto Sans SC", "Segoe UI Variable", system-ui, sans-serif;
   font-weight: 450;
   color: #eeeef0;
-  background: #171717;
+  background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -12,8 +12,7 @@
   --line-soft: #2a2a2d;
   --text: #eeeef0;
   --panel: #241e1f;
-  --panel-translucent: rgba(36, 30, 31, .78);
-  --sidebar-ambient: radial-gradient(circle at 18% 12%, rgba(112, 54, 51, .30), transparent 42%), radial-gradient(circle at 82% 78%, rgba(91, 48, 45, .20), transparent 50%), #241e1f;
+  --panel-translucent: rgba(30, 25, 24, .86);
   --paper: #171717;
   --bottom: #151515;
   --text-strong: #f1f1f3;
@@ -34,13 +33,12 @@
 :root[data-theme="light"] {
   color-scheme: light;
   color: #1a1a1f;
-  background: #f5f5f6;
+  background: transparent;
   --line: #d7d7dc;
   --line-soft: #e6e6ea;
   --text: #1a1a1f;
   --panel: #f8eff2;
   --panel-translucent: rgba(248, 239, 242, .80);
-  --sidebar-ambient: radial-gradient(circle at 18% 14%, rgba(211, 151, 159, .34), transparent 42%), radial-gradient(circle at 82% 80%, rgba(208, 169, 166, .22), transparent 50%), #f8eff2;
   --paper: #f7f7f8;
   --bottom: #f3f3f5;
   --text-strong: #19191d;
@@ -59,14 +57,14 @@
 
 :root[data-theme="dark"] {
   color: #eeeef0;
-  background: #171717;
+  background: transparent;
 }
 :root[data-theme="light"] * { scrollbar-color: #b8b8bf transparent; }
 :root[data-theme="light"] *::-webkit-scrollbar-thumb { background: #b8b8bf; background-clip: padding-box; }
 :root[data-theme="light"] *::-webkit-scrollbar-thumb:hover { background: #92929b; background-clip: padding-box; }
 
 * { box-sizing: border-box; }
-html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
 * { scrollbar-width: thin; scrollbar-color: #4a4a4f transparent; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-track { background: transparent; }
@@ -95,21 +93,10 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   isolation: isolate;
   background: var(--panel);
 }
-.window-shell::before {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  inset: 0 auto 0 0;
-  width: 100%;
-  background: var(--sidebar-ambient);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 180ms ease;
-}
-.translucent-sidebar .window-shell::before { opacity: 1; }
+.translucent-sidebar .window-shell { background: var(--panel-translucent); }
 .window-chrome { height: 30px; display: flex; align-items: center; justify-content: space-between; background: var(--panel); border-bottom: 0; color: var(--chrome-text); user-select: none; }
 .window-chrome, .app-shell { position: relative; z-index: 1; }
-.translucent-sidebar .window-chrome { background: transparent; }
+.window-shell .window-chrome { background: transparent; }
 .window-chrome-left, .window-chrome-right { height: 100%; display: flex; align-items: center; }
 .window-chrome-left { gap: 1px; padding-left: 4px; }
 .window-chrome-right { padding-left: 8px; }
@@ -133,26 +120,22 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   height: 100%;
   min-width: 680px;
   min-height: 0;
-  background: var(--panel);
+  background: transparent;
   position: relative;
   isolation: isolate;
   transition: grid-template-columns 260ms cubic-bezier(.2, .7, .2, 1);
 }
-
-.translucent-sidebar .app-shell { background: transparent; }
 
 .app-shell.is-dragging { transition: none; user-select: none; }
 .app-shell.drag-left, .app-shell.drag-right { cursor: col-resize; }
 .app-shell.drag-bottom { cursor: row-resize; }
 
 .panel { min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); transition: opacity 180ms ease; }
-.translucent-sidebar .left-panel {
+.window-shell .left-panel {
   background: transparent;
-  backdrop-filter: blur(22px) saturate(1.24);
-  -webkit-backdrop-filter: blur(22px) saturate(1.24);
   box-shadow: none;
 }
-.translucent-sidebar .sidebar-footer { background: transparent; }
+.window-shell .sidebar-footer { background: transparent; }
 .panel.is-closed, .bottom-panel.is-closed { opacity: 0; pointer-events: none; }
 .left-panel { grid-column: 1; grid-row: 1; }
 .right-panel {

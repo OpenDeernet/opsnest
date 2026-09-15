@@ -5918,8 +5918,8 @@ function AppearanceSettings({
           label={isEnglish ? "Translucent sidebar" : "半透明侧边栏"}
           description={
             isEnglish
-              ? "Blend the sidebar softly with the window background"
-              : "让左侧栏与窗口背景产生轻微的透明融合效果"
+              ? "Use the native Acrylic window material with a restrained sidebar tint"
+              : "使用窗口级 Acrylic 毛玻璃，并以克制的侧栏 tint 融合背景"
           }
         >
           <Toggle
