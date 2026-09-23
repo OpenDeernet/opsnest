@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    fs::File as TokioFile,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -363,16 +366,37 @@ pub async fn download_remote_file(
             return Err(error.to_string());
         }
     };
-    let mut data = Vec::new();
-    let read_result = remote
-        .read_to_end(&mut data)
+    let mut local = match TokioFile::create(Path::new(&local_path)).await {
+        Ok(file) => file,
+        Err(error) => {
+            drop(remote);
+            let _ = sftp.close().await;
+            return Err(error.to_string());
+        }
+    };
+    let copy_result = tokio::io::copy(&mut remote, &mut local)
         .await
         .map_err(|error| error.to_string());
+    let flush_result = if copy_result.is_ok() {
+        local.flush().await.map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
     drop(remote);
+    drop(local);
     let _ = sftp.close().await;
-    read_result?;
-    fs::write(Path::new(&local_path), &data).map_err(|error| error.to_string())?;
-    Ok(data.len() as u64)
+    let bytes = match copy_result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(Path::new(&local_path)).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = flush_result {
+        let _ = tokio::fs::remove_file(Path::new(&local_path)).await;
+        return Err(error);
+    }
+    Ok(bytes)
 }
 
 #[tauri::command]
@@ -381,7 +405,9 @@ pub async fn upload_remote_file(
     local_path: String,
     remote_path: String,
 ) -> Result<u64, String> {
-    let data = fs::read(Path::new(&local_path)).map_err(|error| error.to_string())?;
+    let mut local = TokioFile::open(Path::new(&local_path))
+        .await
+        .map_err(|error| error.to_string())?;
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let mut remote = match sftp.create(remote_path).await {
         Ok(file) => file,
@@ -390,20 +416,19 @@ pub async fn upload_remote_file(
             return Err(error.to_string());
         }
     };
-    let write_result = remote
-        .write_all(&data)
+    let copy_result = tokio::io::copy(&mut local, &mut remote)
         .await
         .map_err(|error| error.to_string());
-    let shutdown_result = if write_result.is_ok() {
+    let shutdown_result = if copy_result.is_ok() {
         remote.shutdown().await.map_err(|error| error.to_string())
     } else {
         Ok(())
     };
     drop(remote);
     let _ = sftp.close().await;
-    write_result?;
+    let bytes = copy_result?;
     shutdown_result?;
-    Ok(data.len() as u64)
+    Ok(bytes)
 }
 
 /// Upload bounded bytes over a dedicated SFTP connection. This is used by the
